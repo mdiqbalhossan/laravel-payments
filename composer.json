@@ -12,7 +12,7 @@
   ],
   "license": "MIT",
   "minimum-stability": "stable",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "require": {
     "php": "^8.2",
     "illuminate/support": "^10|^11|^12",
@@ -20,7 +20,6 @@
     "illuminate/http": "^10|^11",
     "srmklive/paypal": "^3.0",
     "stripe/stripe-php": "^15.0",
-    "techtailor/laravel-paytm": "^1.1",
     "abraham-flutterwave/laravel-payment": "^1.0",
     "raziul/sslcommerz-laravel": "^1.0",
     "mollie/laravel-mollie": "^3.0",
@@ -63,7 +62,8 @@
   },
   "suggest": {
     "squareboat/razorpay-cashier": "Required for Razorpay support (Laravel 12 only)",
-    "iamolayemi/laravel-paystack": "Paystack (Laravel 9/10)"
+    "iamolayemi/laravel-paystack": "Paystack (Laravel 9/10)",
+    "techtailor/laravel-paytm": "Paytm (Laravel 9 only)"
   },
   "authors": [
     {
