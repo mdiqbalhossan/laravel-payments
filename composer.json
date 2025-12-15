@@ -55,6 +55,12 @@
       }
     }
   },
+  "repositories": [
+    {
+      "type": "vcs",
+      "url": "https://github.com/mdiqbalhossan/laravel-payments.git"
+    }
+  ],
   "config": {
     "sort-packages": true,
     "optimize-autoloader": true
