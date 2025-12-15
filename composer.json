@@ -5,7 +5,7 @@
   "keywords": ["laravel", "payment", "gateway", "paypal", "stripe", "razorpay"],
   "license": "MIT",
   "minimum-stability": "stable",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "require": {
     "php": "^8.2",
     "illuminate/support": "^10|^11",
