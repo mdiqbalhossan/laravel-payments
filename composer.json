@@ -11,7 +11,7 @@
     "illuminate/support": "^10|^11",
     "guzzlehttp/guzzle": "^7.0",
     "illuminate/http": "^10|^11",
-    "netshell/paypal": "^3.0",
+    "netshell/paypal": "^1.1",
     "stripe/stripe-php": "^15.0",
     "squareboat/razorpay-cashier": "^1.0",
     "iamolayemi/laravel-paystack": "^1.0",
