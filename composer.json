@@ -12,7 +12,7 @@
   ],
   "license": "MIT",
   "minimum-stability": "stable",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "require": {
     "php": "^8.2",
     "illuminate/support": "^10|^11|^12",
@@ -20,7 +20,6 @@
     "illuminate/http": "^10|^11",
     "srmklive/paypal": "^3.0",
     "stripe/stripe-php": "^15.0",
-    "squareboat/razorpay-cashier": "^1.0",
     "iamolayemi/laravel-paystack": "^1.0",
     "techtailor/laravel-paytm": "^1.1",
     "abraham-flutterwave/laravel-payment": "^1.0",
@@ -62,6 +61,9 @@
   "config": {
     "sort-packages": true,
     "optimize-autoloader": true
+  },
+  "suggest": {
+    "squareboat/razorpay-cashier": "Required for Razorpay support (Laravel 12 only)"
   },
   "authors": [
     {
