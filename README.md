@@ -103,6 +103,13 @@ PAYPAL_SANDBOX_CLIENT_ID=your_sandbox_client_id
 PAYPAL_SANDBOX_CLIENT_SECRET=your_sandbox_client_secret
 PAYPAL_LIVE_CLIENT_ID=your_live_client_id
 PAYPAL_LIVE_CLIENT_SECRET=your_live_client_secret
+
+# Example for Mercado Pago
+MERCADOPAGO_MODE=sandbox
+MERCADOPAGO_SANDBOX_ACCESS_TOKEN=your_sandbox_access_token
+MERCADOPAGO_LIVE_ACCESS_TOKEN=your_live_access_token
+MERCADOPAGO_COUNTRY=MX
+MERCADOPAGO_WEBHOOK_SECRET=your_webhook_secret
 ```
 
 ## Configuration

@@ -177,13 +177,13 @@ return [
         'mercadopago' => [
             'mode' => env('MERCADOPAGO_MODE', 'sandbox'),
             'sandbox' => [
-                'client_id' => env('MERCADOPAGO_SANDBOX_CLIENT_ID'),
-                'client_secret' => env('MERCADOPAGO_SANDBOX_CLIENT_SECRET'),
+                'access_token' => env('MERCADOPAGO_SANDBOX_ACCESS_TOKEN'),
             ],
             'live' => [
-                'client_id' => env('MERCADOPAGO_LIVE_CLIENT_ID'),
-                'client_secret' => env('MERCADOPAGO_LIVE_CLIENT_SECRET'),
+                'access_token' => env('MERCADOPAGO_LIVE_ACCESS_TOKEN'),
             ],
+            'country' => env('MERCADOPAGO_COUNTRY', 'MX'),
+            'webhook_secret' => env('MERCADOPAGO_WEBHOOK_SECRET'),
         ],
 
         'cashfree' => [
