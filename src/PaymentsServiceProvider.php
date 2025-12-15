@@ -58,7 +58,8 @@ class PaymentsServiceProvider extends ServiceProvider
             // Register commands            $this->commands([                TestPaymentCommand::class,                ListGatewaysCommand::class,                WebhookUrlCommand::class,            ]);
             // Register commands            $this->commands([                TestPaymentCommand::class,                ListGatewaysCommand::class,                WebhookUrlCommand::class,            ]);
             // Register commands            $this->commands([                TestPaymentCommand::class,                ListGatewaysCommand::class,                WebhookUrlCommand::class,            ]);
-            $this->loadMigrationsFrom(__DIR__ . '/../database/migrations');
+                $this->loadMigrationsFrom(__DIR__ . '/../database/migrations')
+            ], 'config');
         }
 
         // Load routes
