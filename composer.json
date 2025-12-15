@@ -12,7 +12,7 @@
   ],
   "license": "MIT",
   "minimum-stability": "stable",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "require": {
     "php": "^8.2",
     "illuminate/support": "^10|^11",
@@ -30,7 +30,7 @@
     "mercadopago/dx-php": "^2.0",
     "loveycom/cashfree": "^2.0",
     "yogeshgupta/phonepe-laravel": "^1.0",
-    "njoguamos/laravel-pesapal": "^3.0",
+    "njoguamos/laravel-pesapal": "^2.0",
     "midtrans/midtrans-php": "^2.5",
     "myfatoorah/laravel-package": "^2.0",
     "zfhassaan/easypaisa": "^1.0"
