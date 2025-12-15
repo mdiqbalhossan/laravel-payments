@@ -8,7 +8,9 @@ use Mdiqbal\LaravelPayments\Core\GatewayResolver;
 use Mdiqbal\LaravelPayments\Core\PaymentContext;
 use Mdiqbal\LaravelPayments\Contracts\PaymentGatewayInterface;
 use Mdiqbal\LaravelPayments\Http\Controllers\WebhookController;
-use MdiqbalLaravelPaymentsCommandsTestPaymentCommand;use MdiqbalLaravelPaymentsCommandsListGatewaysCommand;use MdiqbalLaravelPaymentsCommandsWebhookUrlCommand;
+use Mdiqbal\LaravelPayments\Commands\TestPaymentCommand;
+use Mdiqbal\LaravelPayments\Commands\ListGatewaysCommand;
+use Mdiqbal\LaravelPayments\Commands\WebhookUrlCommand;
 use Illuminate\Support\Facades\Route;
 
 class PaymentsServiceProvider extends ServiceProvider
@@ -53,13 +55,19 @@ class PaymentsServiceProvider extends ServiceProvider
         // Publish configuration file
         if ($this->app->runningInConsole()) {
             $this->publishes([
-            // Register commands            $this->commands([                TestPaymentCommand::class,                ListGatewaysCommand::class,                WebhookUrlCommand::class,            ]);
-            // Register commands            $this->commands([                TestPaymentCommand::class,                ListGatewaysCommand::class,                WebhookUrlCommand::class,            ]);
-            // Register commands            $this->commands([                TestPaymentCommand::class,                ListGatewaysCommand::class,                WebhookUrlCommand::class,            ]);
-            // Register commands            $this->commands([                TestPaymentCommand::class,                ListGatewaysCommand::class,                WebhookUrlCommand::class,            ]);
-            // Register commands            $this->commands([                TestPaymentCommand::class,                ListGatewaysCommand::class,                WebhookUrlCommand::class,            ]);
-                $this->loadMigrationsFrom(__DIR__ . '/../database/migrations')
+                __DIR__ . '/../config/payments.php' => config_path('payments.php'),
             ], 'config');
+
+            $this->publishes([
+                __DIR__ . '/../database/migrations' => database_path('migrations'),
+            ], 'migrations');
+
+            // Register commands
+            $this->commands([
+                TestPaymentCommand::class,
+                ListGatewaysCommand::class,
+                WebhookUrlCommand::class,
+            ]);
         }
 
         // Load routes
