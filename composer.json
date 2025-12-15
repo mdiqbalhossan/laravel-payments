@@ -12,10 +12,10 @@
   ],
   "license": "MIT",
   "minimum-stability": "stable",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "require": {
     "php": "^8.2",
-    "illuminate/support": "^10|^11",
+    "illuminate/support": "^10|^11|^12",
     "guzzlehttp/guzzle": "^7.0",
     "illuminate/http": "^10|^11",
     "srmklive/paypal": "^3.0",
