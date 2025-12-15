@@ -1,0 +1,57 @@
+# Laravel Payments Package .gitignore
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Composer
+/vendor/
+composer.phar
+composer.lock
+
+# Test coverage
+.phpunit.result.cache
+coverage/
+coverage-html/
+coverage.xml
+coverage.txt
+
+# PHPUnit
+.phpunit.cache/
+
+# Environment
+.env
+.env.local
+.env.testing
+.env.*.local
+
+# Logs
+logs/
+*.log
+
+# Cache
+.phpunit.result.cache
+
+# Temporary files
+*.tmp
+*.temp
+
+# Build artifacts
+build/
+dist/
+
+# Backup files
+*.bak
+*.backup

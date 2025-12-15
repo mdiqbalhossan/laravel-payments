@@ -1,0 +1,65 @@
+{
+  "name": "mdiqbal/laravel-payments",
+  "description": "A unified payment gateway package for Laravel supporting 21+ payment providers",
+  "type": "laravel-package",
+  "keywords": ["laravel", "payment", "gateway", "paypal", "stripe", "razorpay"],
+  "license": "MIT",
+  "minimum-stability": "stable",
+  "version": "1.0.0",
+  "require": {
+    "php": "^8.2",
+    "illuminate/support": "^10|^11",
+    "guzzlehttp/guzzle": "^7.0",
+    "illuminate/http": "^10|^11",
+    "netshell/paypal": "^3.0",
+    "stripe/stripe-php": "^15.0",
+    "squareboat/razorpay-cashier": "^1.0",
+    "iamolayemi/laravel-paystack": "^1.0",
+    "techtailor/laravel-paytm": "^2.0",
+    "abraham-flutterwave/laravel-payment": "^1.0",
+    "raziul/sslcommerz-laravel": "^2.0",
+    "mollie/laravel-mollie": "^3.0",
+    "sabitahmad/laravel-bkash": "^3.0",
+    "mercadopago/dx-php": "^2.0",
+    "loveycom/cashfree": "^2.0",
+    "yogeshgupta/phonepe-laravel": "^2.0",
+    "njoguamos/laravel-pesapal": "^3.0",
+    "midtrans/midtrans-php": "^2.5",
+    "myfatoorah/laravel-package": "^2.0",
+    "zfhassaan/easypaisa": "^1.0"
+  },
+  "require-dev": {
+    "orchestra/testbench": "^9.0",
+    "phpunit/phpunit": "^10"
+  },
+  "autoload": {
+    "psr-4": {
+      "Mdiqbal\\LaravelPayments\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Mdiqbal\\LaravelPayments\\Tests\\": "tests/"
+    }
+  },
+  "extra": {
+    "laravel": {
+      "providers": [
+        "Mdiqbal\\LaravelPayments\\PaymentsServiceProvider"
+      ],
+      "aliases": {
+        "Payment": "Mdiqbal\\LaravelPayments\\Facades\\Payment"
+      }
+    }
+  },
+  "config": {
+    "sort-packages": true,
+    "optimize-autoloader": true
+  },
+  "authors": [
+    {
+      "name": "Md Iqbal Hossan Fazlay Rabbi",
+      "email": "jmiqbal2019@gmail.com"
+    }
+  ]
+}
