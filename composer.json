@@ -5,7 +5,7 @@
   "keywords": ["laravel", "payment", "gateway", "paypal", "stripe", "razorpay"],
   "license": "MIT",
   "minimum-stability": "stable",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "require": {
     "php": "^8.2",
     "illuminate/support": "^10|^11",
@@ -15,7 +15,7 @@
     "stripe/stripe-php": "^15.0",
     "squareboat/razorpay-cashier": "^1.0",
     "iamolayemi/laravel-paystack": "^1.0",
-    "techtailor/laravel-paytm": "^2.0",
+    "techtailor/laravel-paytm": "^1.1",
     "abraham-flutterwave/laravel-payment": "^1.0",
     "raziul/sslcommerz-laravel": "^2.0",
     "mollie/laravel-mollie": "^3.0",
