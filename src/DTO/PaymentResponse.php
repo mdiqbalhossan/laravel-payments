@@ -53,6 +53,21 @@ class PaymentResponse
     }
 
     /**
+     * Create an error response (alias for failure with error code support)
+     */
+    public static function error(string $message, string|int $code = 400, array $data = []): self
+    {
+        return new self(
+            success: false,
+            message: $message,
+            status: Arr::get($data, 'status', 'error'),
+            data: array_merge($data, ['error_code' => $code]),
+            meta: Arr::get($data, 'meta', [])
+        );
+    }
+
+
+    /**
      * Create a response that requires redirect
      */
     public static function redirect(string $url, array $data = []): self
@@ -105,11 +120,95 @@ class PaymentResponse
     }
 
     /**
+     * Check if response is a redirect (alias for requiresRedirect)
+     */
+    public function isRedirect(): bool
+    {
+        return $this->requiresRedirect();
+    }
+
+
+    /**
      * Get data value by key
      */
-    public function getData(string $key, mixed $default = null): mixed
+    public function getDataValue(string $key, mixed $default = null): mixed
     {
         return Arr::get($this->data, $key, $default);
+    }
+
+    /**
+     * Get all data or a specific key from data array
+     */
+    public function getData(?string $key = null, mixed $default = null): mixed
+    {
+        if ($key === null) {
+            return $this->data;
+        }
+        return Arr::get($this->data, $key, $default);
+    }
+
+    /**
+     * Get transaction ID
+     */
+    public function getTransactionId(): ?string
+    {
+        return $this->transactionId;
+    }
+
+    /**
+     * Get redirect URL
+     */
+    public function getRedirectUrl(): ?string
+    {
+        return $this->redirectUrl;
+    }
+
+    /**
+     * Get message
+     */
+    public function getMessage(): ?string
+    {
+        return $this->message;
+    }
+
+    /**
+     * Get status
+     */
+    public function getStatus(): ?string
+    {
+        return $this->status;
+    }
+
+    /**
+     * Get amount
+     */
+    public function getAmount(): ?float
+    {
+        return $this->amount;
+    }
+
+    /**
+     * Get currency
+     */
+    public function getCurrency(): ?string
+    {
+        return $this->currency;
+    }
+
+    /**
+     * Check if payment was successful
+     */
+    public function isSuccess(): bool
+    {
+        return $this->success;
+    }
+
+    /**
+     * Get gateway reference
+     */
+    public function getGatewayReference(): ?string
+    {
+        return $this->gatewayReference;
     }
 
     /**

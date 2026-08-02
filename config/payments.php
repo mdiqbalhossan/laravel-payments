@@ -92,9 +92,11 @@ return [
             'mode' => env('PAYSTACK_MODE', 'sandbox'),
             'sandbox' => [
                 'secret_key' => env('PAYSTACK_SANDBOX_SECRET'),
+                'public_key' => env('PAYSTACK_SANDBOX_PUBLIC_KEY'),
             ],
             'live' => [
                 'secret_key' => env('PAYSTACK_LIVE_SECRET'),
+                'public_key' => env('PAYSTACK_LIVE_PUBLIC_KEY'),
             ],
         ],
 

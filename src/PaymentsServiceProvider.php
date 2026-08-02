@@ -58,10 +58,6 @@ class PaymentsServiceProvider extends ServiceProvider
                 __DIR__ . '/../config/payments.php' => config_path('payments.php'),
             ], 'config');
 
-            $this->publishes([
-                __DIR__ . '/../database/migrations' => database_path('migrations'),
-            ], 'migrations');
-
             // Register commands
             $this->commands([
                 TestPaymentCommand::class,

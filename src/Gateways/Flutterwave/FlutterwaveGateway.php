@@ -2,16 +2,12 @@
 
 namespace Mdiqbal\LaravelPayments\Gateways\Flutterwave;
 
+use Flutterwave\Flutterwave as FlutterwaveSDK;
+use Flutterwave\Services\Subscriptions;
 use Mdiqbal\LaravelPayments\Core\AbstractGateway;
 use Mdiqbal\LaravelPayments\DTO\PaymentRequest;
 use Mdiqbal\LaravelPayments\DTO\PaymentResponse;
 use Mdiqbal\LaravelPayments\Exceptions\PaymentException;
-use Flutterwave\Flutterwave as FlutterwaveSDK;
-use Flutterwave\Services\Payments;
-use Flutterwave\Services\Refunds;
-use Flutterwave\Services\Subscriptions;
-use Flutterwave\Services\PaymentPlan;
-use Flutterwave\Services\Customers;
 
 class FlutterwaveGateway extends AbstractGateway
 {
@@ -33,7 +29,7 @@ class FlutterwaveGateway extends AbstractGateway
         try {
             $secretKey = $this->getSecretKey();
 
-            if (!$secretKey) {
+            if (! $secretKey) {
                 throw new PaymentException('Flutterwave secret key not configured');
             }
 
@@ -44,7 +40,7 @@ class FlutterwaveGateway extends AbstractGateway
                 'tx_ref' => $payment->data['tx_ref'] ?? null,
                 'redirect_url' => $payment->data['link'] ?? null,
                 'amount' => $request->getAmount(),
-                'currency' => $request->getCurrency()
+                'currency' => $request->getCurrency(),
             ]);
 
             return PaymentResponse::redirect($payment->data['link'], [
@@ -53,15 +49,15 @@ class FlutterwaveGateway extends AbstractGateway
                 'amount' => $request->getAmount(),
                 'currency' => $request->getCurrency(),
                 'status' => 'created',
-                'message' => 'Payment created successfully'
+                'message' => 'Payment created successfully',
             ]);
 
         } catch (\Exception $e) {
             $this->log('error', 'Flutterwave payment creation failed', [
                 'error' => $e->getMessage(),
-                'amount' => $request->getAmount()
+                'amount' => $request->getAmount(),
             ]);
-            throw new PaymentException('Flutterwave payment failed: ' . $e->getMessage());
+            throw new PaymentException('Flutterwave payment failed: '.$e->getMessage());
         }
     }
 
@@ -70,14 +66,14 @@ class FlutterwaveGateway extends AbstractGateway
         try {
             $transactionId = $payload['transaction_id'] ?? $payload['tx_ref'] ?? null;
 
-            if (!$transactionId) {
+            if (! $transactionId) {
                 throw new PaymentException('No transaction ID found in payload');
             }
 
             // Verify transaction from Flutterwave
             $transaction = $this->getTransaction($transactionId);
 
-            $status = match($transaction->data['status']) {
+            $status = match ($transaction->data['status']) {
                 'successful' => 'completed',
                 'failed' => 'failed',
                 'cancelled' => 'canceled',
@@ -89,7 +85,7 @@ class FlutterwaveGateway extends AbstractGateway
                 'tx_ref' => $transaction->data['tx_ref'],
                 'transaction_id' => $transaction->data['id'],
                 'status' => $status,
-                'amount' => $transaction->data['amount']
+                'amount' => $transaction->data['amount'],
             ]);
 
             return new PaymentResponse(
@@ -109,16 +105,16 @@ class FlutterwaveGateway extends AbstractGateway
                     'app_fee' => $transaction->data['app_fee'] ?? 0,
                     'merchant_fee' => $transaction->data['merchant_fee'] ?? 0,
                     'processor_response' => $transaction->data['processor_response'] ?? null,
-                    'verification_data' => $payload
+                    'verification_data' => $payload,
                 ]
             );
 
         } catch (\Exception $e) {
             $this->log('error', 'Flutterwave payment verification failed', [
                 'error' => $e->getMessage(),
-                'payload' => $payload
+                'payload' => $payload,
             ]);
-            throw new PaymentException('Flutterwave payment verification failed: ' . $e->getMessage());
+            throw new PaymentException('Flutterwave payment verification failed: '.$e->getMessage());
         }
     }
 
@@ -131,7 +127,7 @@ class FlutterwaveGateway extends AbstractGateway
                 'refund_id' => $refund->data['id'] ?? null,
                 'transaction_id' => $transactionId,
                 'amount' => $amount,
-                'status' => $refund->data['status'] ?? null
+                'status' => $refund->data['status'] ?? null,
             ]);
 
             return true;
@@ -140,9 +136,9 @@ class FlutterwaveGateway extends AbstractGateway
             $this->log('error', 'Flutterwave refund failed', [
                 'transaction_id' => $transactionId,
                 'amount' => $amount,
-                'error' => $e->getMessage()
+                'error' => $e->getMessage(),
             ]);
-            throw new PaymentException('Flutterwave refund failed: ' . $e->getMessage());
+            throw new PaymentException('Flutterwave refund failed: '.$e->getMessage());
         }
     }
 
@@ -158,9 +154,10 @@ class FlutterwaveGateway extends AbstractGateway
     {
         try {
             $response = $this->getFlutterwave()->customer()->create($customerData);
+
             return $response->data ?? [];
         } catch (\Exception $e) {
-            throw new PaymentException('Flutterwave customer creation failed: ' . $e->getMessage());
+            throw new PaymentException('Flutterwave customer creation failed: '.$e->getMessage());
         }
     }
 
@@ -171,9 +168,10 @@ class FlutterwaveGateway extends AbstractGateway
     {
         try {
             $response = $this->getFlutterwave()->customer()->find($email);
+
             return $response->data ?? [];
         } catch (\Exception $e) {
-            throw new PaymentException('Failed to fetch Flutterwave customer: ' . $e->getMessage());
+            throw new PaymentException('Failed to fetch Flutterwave customer: '.$e->getMessage());
         }
     }
 
@@ -184,9 +182,10 @@ class FlutterwaveGateway extends AbstractGateway
     {
         try {
             $response = $this->getFlutterwave()->paymentPlan()->create($planData);
+
             return $response->data ?? [];
         } catch (\Exception $e) {
-            throw new PaymentException('Flutterwave payment plan creation failed: ' . $e->getMessage());
+            throw new PaymentException('Flutterwave payment plan creation failed: '.$e->getMessage());
         }
     }
 
@@ -197,9 +196,10 @@ class FlutterwaveGateway extends AbstractGateway
     {
         try {
             $response = $this->getFlutterwave()->paymentPlan()->list($params);
+
             return $response->data ?? [];
         } catch (\Exception $e) {
-            throw new PaymentException('Failed to fetch Flutterwave payment plans: ' . $e->getMessage());
+            throw new PaymentException('Failed to fetch Flutterwave payment plans: '.$e->getMessage());
         }
     }
 
@@ -224,11 +224,11 @@ class FlutterwaveGateway extends AbstractGateway
                     'currency' => $response->data['currency'] ?? null,
                     'status' => $response->data['status'],
                     'created_at' => $response->data['created_at'] ?? null,
-                    'next_payment_date' => $response->data['next_payment_date'] ?? null
+                    'next_payment_date' => $response->data['next_payment_date'] ?? null,
                 ]
             );
         } catch (\Exception $e) {
-            throw new PaymentException('Flutterwave subscription creation failed: ' . $e->getMessage());
+            throw new PaymentException('Flutterwave subscription creation failed: '.$e->getMessage());
         }
     }
 
@@ -239,9 +239,10 @@ class FlutterwaveGateway extends AbstractGateway
     {
         try {
             $response = $this->getFlutterwave()->subscription()->find($subscriptionId);
+
             return $response->data ?? [];
         } catch (\Exception $e) {
-            throw new PaymentException('Failed to fetch Flutterwave subscription: ' . $e->getMessage());
+            throw new PaymentException('Failed to fetch Flutterwave subscription: '.$e->getMessage());
         }
     }
 
@@ -252,9 +253,10 @@ class FlutterwaveGateway extends AbstractGateway
     {
         try {
             $response = $this->getFlutterwave()->subscription()->cancel($subscriptionId);
+
             return isset($response->data['status']) && $response->data['status'] === 'cancelled';
         } catch (\Exception $e) {
-            throw new PaymentException('Failed to cancel Flutterwave subscription: ' . $e->getMessage());
+            throw new PaymentException('Failed to cancel Flutterwave subscription: '.$e->getMessage());
         }
     }
 
@@ -266,7 +268,7 @@ class FlutterwaveGateway extends AbstractGateway
         try {
             $response = $this->getFlutterwave()->payment()->find($transactionId);
 
-            $status = match($response->data['status'] ?? '') {
+            $status = match ($response->data['status'] ?? '') {
                 'successful' => 'completed',
                 'failed' => 'failed',
                 'cancelled' => 'canceled',
@@ -291,11 +293,11 @@ class FlutterwaveGateway extends AbstractGateway
                     'charged_amount' => $response->data['amount'] ?? 0,
                     'app_fee' => $response->data['app_fee'] ?? 0,
                     'merchant_fee' => $response->data['merchant_fee'] ?? 0,
-                    'processor_response' => $response->data['processor_response'] ?? null
+                    'processor_response' => $response->data['processor_response'] ?? null,
                 ]
             );
         } catch (\Exception $e) {
-            throw new PaymentException('Failed to fetch Flutterwave transaction: ' . $e->getMessage());
+            throw new PaymentException('Failed to fetch Flutterwave transaction: '.$e->getMessage());
         }
     }
 
@@ -327,11 +329,11 @@ class FlutterwaveGateway extends AbstractGateway
                 'link_ref' => $response->data['data']['link_ref'],
                 'payment_url' => $response->data['link'],
                 'status' => 'created',
-                'message' => 'Payment link created successfully'
+                'message' => 'Payment link created successfully',
             ]);
 
         } catch (\Exception $e) {
-            throw new PaymentException('Failed to create Flutterwave payment link: ' . $e->getMessage());
+            throw new PaymentException('Failed to create Flutterwave payment link: '.$e->getMessage());
         }
     }
 
@@ -350,9 +352,10 @@ class FlutterwaveGateway extends AbstractGateway
     {
         try {
             $response = $this->getFlutterwave()->miscellaneous()->getBanks($country);
+
             return $response->data ?? [];
         } catch (\Exception $e) {
-            throw new PaymentException('Failed to fetch Flutterwave banks: ' . $e->getMessage());
+            throw new PaymentException('Failed to fetch Flutterwave banks: '.$e->getMessage());
         }
     }
 
@@ -363,9 +366,10 @@ class FlutterwaveGateway extends AbstractGateway
     {
         try {
             $response = $this->getFlutterwave()->miscellaneous()->validateBin($bin);
+
             return $response->data ?? [];
         } catch (\Exception $e) {
-            throw new PaymentException('Failed to validate card BIN: ' . $e->getMessage());
+            throw new PaymentException('Failed to validate card BIN: '.$e->getMessage());
         }
     }
 
@@ -440,7 +444,7 @@ class FlutterwaveGateway extends AbstractGateway
             $this->log('info', 'Flutterwave webhook processed', [
                 'event_type' => $eventType,
                 'transaction_id' => $transactionId,
-                'status' => $status
+                'status' => $status,
             ]);
 
             return new PaymentResponse(
@@ -455,15 +459,15 @@ class FlutterwaveGateway extends AbstractGateway
                     'payment_method' => $eventData['payment_method'] ?? null,
                     'payment_type' => $eventData['payment_type'] ?? null,
                     'flw_ref' => $eventData['flw_ref'] ?? null,
-                    'webhook_data' => $payload
+                    'webhook_data' => $payload,
                 ]
             );
 
         } catch (\Exception $e) {
             $this->log('error', 'Flutterwave webhook processing failed', [
-                'error' => $e->getMessage()
+                'error' => $e->getMessage(),
             ]);
-            throw new PaymentException('Flutterwave webhook processing failed: ' . $e->getMessage());
+            throw new PaymentException('Flutterwave webhook processing failed: '.$e->getMessage());
         }
     }
 
@@ -474,17 +478,21 @@ class FlutterwaveGateway extends AbstractGateway
     {
         $secretKey = $this->getSecretKey();
         $publicKey = $this->getPublicKey();
+        $encryptionKey = $this->getEncryptionKey();
 
-        if ($secretKey) {
-            $config = [
+        if ($secretKey && $publicKey) {
+            // Set up the SDK configuration using static method
+            $env = $this->getModeConfig('environment') ?? ($this->getModeConfig('mode') === 'live' ? 'production' : 'staging');
+
+            FlutterwaveSDK::setUp([
                 'secret_key' => $secretKey,
-            ];
+                'public_key' => $publicKey,
+                'encryption_key' => $encryptionKey ?? $secretKey, // Use secret key as fallback
+                'environment' => $env,
+            ]);
 
-            if ($publicKey) {
-                $config['public_key'] = $publicKey;
-            }
-
-            $this->flutterwave = new FlutterwaveSDK($config);
+            // Now we can instantiate the Flutterwave class
+            $this->flutterwave = new FlutterwaveSDK;
         }
     }
 
@@ -495,18 +503,25 @@ class FlutterwaveGateway extends AbstractGateway
     {
         if ($this->flutterwave === null) {
             $secretKey = $this->getSecretKey();
-
-            if (!$secretKey) {
-                throw new PaymentException('Flutterwave secret key not configured');
-            }
-
-            $config = ['secret_key' => $secretKey];
             $publicKey = $this->getPublicKey();
-            if ($publicKey) {
-                $config['public_key'] = $publicKey;
+
+            if (! $secretKey || ! $publicKey) {
+                throw new PaymentException('Flutterwave secret key and public key must be configured');
             }
 
-            $this->flutterwave = new FlutterwaveSDK($config);
+            $encryptionKey = $this->getEncryptionKey();
+            $env = $this->getModeConfig('environment') ?? ($this->getModeConfig('mode') === 'live' ? 'production' : 'staging');
+
+            // Set up the SDK configuration using static method
+            FlutterwaveSDK::setUp([
+                'secret_key' => $secretKey,
+                'public_key' => $publicKey,
+                'encryption_key' => $encryptionKey ?? $secretKey, // Use secret key as fallback
+                'environment' => $env,
+            ]);
+
+            // Now we can instantiate the Flutterwave class
+            $this->flutterwave = new FlutterwaveSDK;
         }
 
         return $this->flutterwave;
@@ -554,8 +569,8 @@ class FlutterwaveGateway extends AbstractGateway
             'payment_options' => $metadata['payment_options'] ?? 'card,mobilemoney,ussd,banktransfer',
             'meta' => [
                 'description' => $request->getDescription() ?? 'Payment',
-                'order_id' => $txRef
-            ]
+                'order_id' => $txRef,
+            ],
         ];
 
         // Add customer details if provided
@@ -616,24 +631,8 @@ class FlutterwaveGateway extends AbstractGateway
                 'currency' => $currency,
                 'description' => $request->getDescription() ?? 'Payment',
                 'redirect_url' => $paymentData['redirect_url'],
-                'customer' => $paymentData['customer'] ?? null
+                'customer' => $paymentData['customer'] ?? null,
             ]);
-        }
-    }
-
-    /**
-     * Get transaction details
-     */
-    private function getTransaction(string $txRef): array
-    {
-        try {
-            return $this->getFlutterwave()->payment()->find($txRef);
-        } catch (\Exception $e) {
-            $this->log('error', 'Failed to get transaction details', [
-                'tx_ref' => $txRef,
-                'error' => $e->getMessage()
-            ]);
-            throw $e;
         }
     }
 
@@ -645,7 +644,7 @@ class FlutterwaveGateway extends AbstractGateway
         $refundData = [
             'tx_ref' => $transactionId,
             'amount' => $amount,
-            'reason' => 'Customer requested refund'
+            'reason' => 'Customer requested refund',
         ];
 
         return $this->getFlutterwave()->refund()->create($refundData);
@@ -669,7 +668,7 @@ class FlutterwaveGateway extends AbstractGateway
             'mobilemoney_uganda',
             'mobilemoney_ghana',
             'mobile_money_francophone',
-            'barter'
+            'barter',
         ];
     }
 
@@ -680,9 +679,10 @@ class FlutterwaveGateway extends AbstractGateway
     {
         try {
             $response = $this->getFlutterwave()->miscellaneous()->getExchangeRates($currency);
+
             return $response->data ?? [];
         } catch (\Exception $e) {
-            throw new PaymentException('Failed to fetch Flutterwave exchange rates: ' . $e->getMessage());
+            throw new PaymentException('Failed to fetch Flutterwave exchange rates: '.$e->getMessage());
         }
     }
 
@@ -693,26 +693,30 @@ class FlutterwaveGateway extends AbstractGateway
     {
         try {
             $response = $this->getFlutterwave()->miscellaneous()->getTransferRates($sourceCurrency);
+
             return $response->data ?? [];
         } catch (\Exception $e) {
-            throw new PaymentException('Failed to fetch Flutterwave transfer rates: ' . $e->getMessage());
+            throw new PaymentException('Failed to fetch Flutterwave transfer rates: '.$e->getMessage());
         }
     }
 
     /**
      * Validate webhook signature
      */
-    public function validateWebhookSignature(string $payload, string $signature): bool
+    public function validateWebhookSignature(array $payload, string $signature): bool
     {
         try {
             $secretHash = $this->getSecretKey();
-            $computedHash = hash_hmac('sha512', $payload, $secretHash);
+            // Convert array back to JSON string for hash calculation
+            $payloadString = json_encode($payload);
+            $computedHash = hash_hmac('sha512', $payloadString, $secretHash);
 
             return hash_equals($signature, $computedHash);
         } catch (\Exception $e) {
             $this->log('error', 'Webhook signature validation failed', [
-                'error' => $e->getMessage()
+                'error' => $e->getMessage(),
             ]);
+
             return false;
         }
     }
@@ -724,9 +728,10 @@ class FlutterwaveGateway extends AbstractGateway
     {
         try {
             $response = $this->getFlutterwave()->payment()->getSettlements($params);
+
             return $response->data ?? [];
         } catch (\Exception $e) {
-            throw new PaymentException('Failed to fetch Flutterwave settlement status: ' . $e->getMessage());
+            throw new PaymentException('Failed to fetch Flutterwave settlement status: '.$e->getMessage());
         }
     }
 
@@ -737,9 +742,10 @@ class FlutterwaveGateway extends AbstractGateway
     {
         try {
             $response = $this->getFlutterwave()->miscellaneous()->balance();
+
             return $response->data ?? [];
         } catch (\Exception $e) {
-            throw new PaymentException('Failed to fetch Flutterwave balance: ' . $e->getMessage());
+            throw new PaymentException('Failed to fetch Flutterwave balance: '.$e->getMessage());
         }
     }
 
@@ -762,11 +768,11 @@ class FlutterwaveGateway extends AbstractGateway
                     'currency' => $response->data['currency'] ?? null,
                     'status' => $response->data['status'] ?? null,
                     'beneficiary_name' => $response->data['beneficiary_name'] ?? null,
-                    'created_at' => $response->data['created_at'] ?? null
+                    'created_at' => $response->data['created_at'] ?? null,
                 ]
             );
         } catch (\Exception $e) {
-            throw new PaymentException('Failed to create Flutterwave transfer: ' . $e->getMessage());
+            throw new PaymentException('Failed to create Flutterwave transfer: '.$e->getMessage());
         }
     }
 
@@ -777,9 +783,10 @@ class FlutterwaveGateway extends AbstractGateway
     {
         try {
             $response = $this->getFlutterwave()->beneficiary()->create($beneficiaryData);
+
             return $response->data ?? [];
         } catch (\Exception $e) {
-            throw new PaymentException('Failed to create Flutterwave beneficiary: ' . $e->getMessage());
+            throw new PaymentException('Failed to create Flutterwave beneficiary: '.$e->getMessage());
         }
     }
 
@@ -790,9 +797,10 @@ class FlutterwaveGateway extends AbstractGateway
     {
         try {
             $response = $this->getFlutterwave()->beneficiary()->list($params);
+
             return $response->data ?? [];
         } catch (\Exception $e) {
-            throw new PaymentException('Failed to fetch Flutterwave beneficiaries: ' . $e->getMessage());
+            throw new PaymentException('Failed to fetch Flutterwave beneficiaries: '.$e->getMessage());
         }
     }
 
@@ -803,9 +811,10 @@ class FlutterwaveGateway extends AbstractGateway
     {
         try {
             $response = $this->getFlutterwave()->virtualAccount()->create($accountData);
+
             return $response->data ?? [];
         } catch (\Exception $e) {
-            throw new PaymentException('Failed to create Flutterwave virtual account: ' . $e->getMessage());
+            throw new PaymentException('Failed to create Flutterwave virtual account: '.$e->getMessage());
         }
     }
 
@@ -816,9 +825,10 @@ class FlutterwaveGateway extends AbstractGateway
     {
         try {
             $response = $this->getFlutterwave()->virtualAccount()->list($params);
+
             return $response->data ?? [];
         } catch (\Exception $e) {
-            throw new PaymentException('Failed to fetch Flutterwave virtual accounts: ' . $e->getMessage());
+            throw new PaymentException('Failed to fetch Flutterwave virtual accounts: '.$e->getMessage());
         }
     }
 }

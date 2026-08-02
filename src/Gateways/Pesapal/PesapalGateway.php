@@ -2,9 +2,9 @@
 
 namespace Mdiqbal\LaravelPayments\Gateways\Pesapal;
 
-use Mdiqbal\LaravelPayments\DTOs\PaymentRequest;
-use Mdiqbal\LaravelPayments\DTOs\PaymentResponse;
-use Mdiqbal\LaravelPayments\Gateways\AbstractGateway;
+use Mdiqbal\LaravelPayments\DTO\PaymentRequest;
+use Mdiqbal\LaravelPayments\DTO\PaymentResponse;
+use Mdiqbal\LaravelPayments\Core\AbstractGateway;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -15,6 +15,14 @@ class PesapalGateway extends AbstractGateway
      * Gateway name
      */
     protected string $name = 'pesapal';
+
+    /**
+     * Get gateway name
+     */
+    public function gatewayName(): string
+    {
+        return $this->name;
+    }
 
     /**
      * Supported currencies by Pesapal
@@ -34,8 +42,8 @@ class PesapalGateway extends AbstractGateway
     /**
      * API configuration
      */
-    private string $consumerKey;
-    private string $consumerSecret;
+    private ?string $consumerKey;
+    private ?string $consumerSecret;
     private string $baseUrl;
     private bool $testMode;
 
@@ -43,9 +51,9 @@ class PesapalGateway extends AbstractGateway
     {
         parent::__construct($config);
 
-        $this->consumerKey = $this->config->get('consumer_key');
-        $this->consumerSecret = $this->config->get('consumer_secret');
-        $this->testMode = $this->config->get('test_mode', true);
+        $this->consumerKey = $this->config['consumer_key'] ?? null;
+        $this->consumerSecret = $this->config['consumer_secret'] ?? null;
+        $this->testMode = $this->config['test_mode'] ?? true;
 
         $this->baseUrl = $this->testMode
             ? 'https://cybqa.pesapal.com/pesapalv3/api'
@@ -217,36 +225,38 @@ class PesapalGateway extends AbstractGateway
 
     /**
      * Process refund through Pesapal
+     * Note: Implementation limitations - Pesapal requires order tracking ID for refunds.
+     * The transactionId parameter should be the order tracking ID.
      */
-    public function refund(array $data): PaymentResponse
+    public function refund(string $transactionId, float $amount): bool
     {
         try {
-            $orderTrackingId = $data['order_tracking_id'] ?? null;
-            $refundAmount = $data['amount'] ?? null;
-            $refundReason = $data['reason'] ?? 'Customer requested refund';
-
-            if (!$orderTrackingId || !$refundAmount) {
-                return new PaymentResponse(
-                    success: false,
-                    message: 'Order tracking ID and refund amount are required'
-                );
+            if (!$transactionId) {
+                Log::error('Pesapal refund failed: Order tracking ID is required');
+                return false;
             }
+
+            if ($amount <= 0) {
+                Log::error('Pesapal refund failed: Refund amount must be greater than 0');
+                return false;
+            }
+
+            $orderTrackingId = $transactionId; // Transaction ID is the order tracking ID for Pesapal
+            $refundReason = 'Customer requested refund';
 
             // Get access token
             $token = $this->getAccessToken();
 
             if (!$token) {
-                return new PaymentResponse(
-                    success: false,
-                    message: 'Failed to authenticate with Pesapal'
-                );
+                Log::error('Pesapal refund failed: Failed to authenticate with Pesapal');
+                return false;
             }
 
             // Prepare refund data
             $refundData = [
                 'order_tracking_id' => $orderTrackingId,
-                'amount' => $refundAmount,
-                'username' => $this->config->get('username', ''),
+                'amount' => $amount,
+                'username' => $this->config['username'] ?? '',
                 'reason' => $refundReason,
             ];
 
@@ -259,43 +269,47 @@ class PesapalGateway extends AbstractGateway
             $responseData = $response->json();
 
             Log::info('Pesapal refund request', [
+                'order_tracking_id' => $orderTrackingId,
+                'amount' => $amount,
                 'request' => $refundData,
                 'response' => $responseData
             ]);
 
             if ($response->successful() && isset($responseData['status_code']) && $responseData['status_code'] == 1) {
-                return new PaymentResponse(
-                    success: true,
-                    transactionId: $responseData['order_tracking_id'] ?? null,
-                    message: 'Refund processed successfully',
-                    data: [
-                        'refund_status' => 'processed',
-                        'refund_amount' => $responseData['amount'] ?? 0,
-                        'refund_reference' => $responseData['refund_reference'] ?? null,
-                    ]
-                );
+                Log::info('Pesapal refund processed successfully', [
+                    'order_tracking_id' => $orderTrackingId,
+                    'amount' => $amount,
+                    'refund_reference' => $responseData['refund_reference'] ?? null
+                ]);
+                return true;
             }
 
             $errorMessage = $responseData['error']['message'] ?? 'Refund failed';
-
-            return new PaymentResponse(
-                success: false,
-                message: $errorMessage,
-                errorCode: $responseData['error']['code'] ?? 'REFUND_ERROR',
-                data: $responseData
-            );
+            Log::error('Pesapal refund failed', [
+                'order_tracking_id' => $orderTrackingId,
+                'amount' => $amount,
+                'error' => $errorMessage,
+                'response' => $responseData
+            ]);
+            return false;
 
         } catch (\Exception $e) {
             Log::error('Pesapal refund error', [
+                'transaction_id' => $transactionId,
+                'amount' => $amount,
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString()
             ]);
-
-            return new PaymentResponse(
-                success: false,
-                message: 'Refund processing failed: ' . $e->getMessage()
-            );
+            return false;
         }
+    }
+
+    /**
+     * Check if gateway supports refunds
+     */
+    public function supportsRefund(): bool
+    {
+        return true;
     }
 
     /**
@@ -378,8 +392,8 @@ class PesapalGateway extends AbstractGateway
                 'currency' => $data['currency'] ?? 'KES',
                 'amount' => $data['amount'],
                 'description' => $data['description'] ?? 'Payment via Pesapal',
-                'redirect_url' => $data['redirect_url'] ?? $this->config->get('return_url'),
-                'callback_url' => $data['callback_url'] ?? $this->config->get('webhook_url'),
+                'redirect_url' => $data['redirect_url'] ?? $this->config['return_url'],
+                'callback_url' => $data['callback_url'] ?? $this->config['webhook_url'],
                 'customer_email' => $data['customer_email'] ?? '',
                 'customer_phone' => $data['customer_phone'] ?? '',
                 'customer_name' => $data['customer_name'] ?? '',
@@ -471,9 +485,9 @@ class PesapalGateway extends AbstractGateway
             'currency' => $request->currency,
             'amount' => $request->amount,
             'description' => $request->description ?? 'Payment via Pesapal',
-            'callback_url' => $request->notifyUrl ?? $this->config->get('webhook_url'),
+            'callback_url' => $request->notifyUrl ?? $this->config['webhook_url'],
             'redirect_mode' => 'REDIRECT', // or POPUP
-            'branch' => $this->config->get('branch', ''),
+            'branch' => $this->config['branch'] ?? '',
             'language' => $request->metadata['language'] ?? 'EN', // EN or SW for Swahili
         ];
 

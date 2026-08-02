@@ -123,7 +123,7 @@ class PhonePeGateway extends AbstractGateway
         }
     }
 
-    public function verify(string $merchantTransactionId): PaymentResponse
+    public function verifyTransaction(string $merchantTransactionId): PaymentResponse
     {
         try {
             if (empty($merchantTransactionId)) {
@@ -188,32 +188,37 @@ class PhonePeGateway extends AbstractGateway
         }
     }
 
-    public function refund(array $data): PaymentResponse
+    public function refund(string $transactionId, float $amount): bool
     {
         try {
-            $merchantTransactionId = $data['merchant_transaction_id'];
-            $refundAmount = $data['amount'] ?? null;
-            $refundReason = $data['reason'] ?? 'Refund requested';
+            Log::info('Processing PhonePe refund', [
+                'transaction_id' => $transactionId,
+                'amount' => $amount
+            ]);
 
-            if (empty($merchantTransactionId)) {
-                return $this->createErrorResponse('Merchant Transaction ID is required');
+            if (empty($transactionId)) {
+                Log::error('PhonePe refund failed: Merchant Transaction ID is required');
+                return false;
             }
 
             // Get original transaction details first
-            $originalTransaction = $this->verify($merchantTransactionId);
+            $originalTransaction = $this->verifyTransaction($transactionId);
 
-            if (!$originalTransaction['success']) {
-                return $this->createErrorResponse('Original transaction not found');
+            if (!$originalTransaction->getSuccess()) {
+                Log::error('PhonePe refund failed: Original transaction not found', [
+                    'transaction_id' => $transactionId
+                ]);
+                return false;
             }
 
             // Prepare refund request
             $refundData = [
                 'merchantId' => $this->config->getMerchantId(),
                 'merchantUserId' => $this->config->getMerchantUserId(),
-                'merchantTransactionId' => $merchantTransactionId,
-                'originalTransactionId' => $originalTransaction['phonepe_transaction_id'],
-                'refundAmount' => $refundAmount,
-                'refundedAmount' => $refundAmount,
+                'merchantTransactionId' => $transactionId,
+                'originalTransactionId' => $originalTransaction->getData()['phonepe_transaction_id'] ?? null,
+                'refundAmount' => (int) round($amount * 100), // Convert to paise
+                'refundedAmount' => (int) round($amount * 100),
             ];
 
             // Generate X-VERIFY for refund
@@ -226,35 +231,39 @@ class PhonePeGateway extends AbstractGateway
             ])->post($this->getEndpoint('pg/v1/refund'), $refundData);
 
             if (!$response->successful()) {
-                return $this->createErrorResponse('Refund request failed');
+                Log::error('PhonePe refund request failed', [
+                    'transaction_id' => $transactionId,
+                    'amount' => $amount,
+                    'status' => $response->status(),
+                    'response' => $response->body()
+                ]);
+                return false;
             }
 
             $result = $response->json();
 
             if (isset($result['success']) && $result['success']) {
-                return PaymentResponse::success([
-                    'refund_id' => $result['data']['refundTransactionId'] ?? 'REF-' . time(),
-                    'merchant_transaction_id' => $merchantTransactionId,
-                    'amount_refunded' => (float) ($result['data']['refundAmount'] ?? $refundAmount),
-                    'currency' => 'INR',
-                    'reason' => $refundReason,
-                    'status' => 'refunded',
-                    'merchant_info' => [
-                        'phonepe_refund_transaction_id' => $result['data']['refundTransactionId'] ?? null,
-                        'merchant_transaction_id' => $merchantTransactionId,
-                        'original_transaction_id' => $result['data']['originalTransactionId'] ?? null,
-                    ]
+                Log::info('PhonePe refund processed successfully', [
+                    'transaction_id' => $transactionId,
+                    'amount' => $amount,
+                    'refund_id' => $result['data']['refundTransactionId'] ?? null
                 ]);
+                return true;
             }
 
-            return $this->createErrorResponse('Refund processing failed: ' . ($result['message'] ?? 'Unknown error'));
-        } catch (Exception $e) {
-            $this->logError('Refund processing failed', [
-                'error' => $e->getMessage(),
-                'data' => $data
+            Log::error('PhonePe refund processing failed', [
+                'transaction_id' => $transactionId,
+                'amount' => $amount,
+                'error' => $result['message'] ?? 'Unknown error'
             ]);
-
-            return $this->createErrorResponse($e->getMessage());
+            return false;
+        } catch (Exception $e) {
+            Log::error('PhonePe refund processing exception', [
+                'transaction_id' => $transactionId,
+                'amount' => $amount,
+                'error' => $e->getMessage()
+            ]);
+            return false;
         }
     }
 
@@ -265,7 +274,7 @@ class PhonePeGateway extends AbstractGateway
 
     public function getTransactionStatus(string $merchantTransactionId): PaymentResponse
     {
-        return $this->verify($merchantTransactionId);
+        return $this->verifyTransaction($merchantTransactionId);
     }
 
     public function searchTransactions(array $filters = []): PaymentResponse

@@ -6,7 +6,7 @@ class RefundException extends PaymentException
 {
     protected ?string $refundId = null;
 
-    public function __construct(string $message = "", int $code = 0, ?Throwable $previous = null, ?string $gateway = null, ?string $transactionId = null, ?string $refundId = null)
+    public function __construct(string $message = "", int $code = 0, ?\Throwable $previous = null, ?string $gateway = null, ?string $transactionId = null, ?string $refundId = null)
     {
         parent::__construct($message, $code, $previous, $gateway, $transactionId);
         $this->refundId = $refundId;

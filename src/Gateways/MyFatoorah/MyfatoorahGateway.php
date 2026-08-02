@@ -2,9 +2,9 @@
 
 namespace Mdiqbal\LaravelPayments\Gateways\Myfatoorah;
 
-use Mdiqbal\LaravelPayments\DTOs\PaymentRequest;
-use Mdiqbal\LaravelPayments\DTOs\PaymentResponse;
-use Mdiqbal\LaravelPayments\Gateways\AbstractGateway;
+use Mdiqbal\LaravelPayments\DTO\PaymentRequest;
+use Mdiqbal\LaravelPayments\DTO\PaymentResponse;
+use Mdiqbal\LaravelPayments\Core\AbstractGateway;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -15,6 +15,14 @@ class MyfatoorahGateway extends AbstractGateway
      * Gateway name
      */
     protected string $name = 'myfatoorah';
+
+    /**
+     * Get gateway name
+     */
+    public function gatewayName(): string
+    {
+        return $this->name;
+    }
 
     /**
      * Supported currencies by MyFatoorah
@@ -43,8 +51,8 @@ class MyfatoorahGateway extends AbstractGateway
     {
         parent::__construct($config);
 
-        $this->apiKey = $this->config->get('api_key');
-        $this->testMode = $this->config->get('test_mode', true);
+        $this->apiKey = $this->config['api_key'] ?? '';
+        $this->testMode = $this->config['test_mode'] ?? true;
 
         $this->baseUrl = $this->testMode
             ? 'https://apitest.myfatoorah.com'
@@ -205,28 +213,32 @@ class MyfatoorahGateway extends AbstractGateway
 
     /**
      * Process refund through MyFatoorah
+     * Note: Implementation limitations - MyFatoorah requires payment ID rather than
+     * transaction ID. The transactionId parameter should be the payment ID.
      */
-    public function refund(array $data): PaymentResponse
+    public function refund(string $transactionId, float $amount): bool
     {
         try {
-            $paymentId = $data['payment_id'] ?? null;
-            $refundAmount = $data['amount'] ?? null;
-            $refundReason = $data['reason'] ?? 'Customer requested refund';
-            $refundChargeOnCustomer = $data['charge_on_customer'] ?? false;
-
-            if (!$paymentId || !$refundAmount) {
-                return new PaymentResponse(
-                    success: false,
-                    message: 'Payment ID and refund amount are required'
-                );
+            if (!$transactionId) {
+                Log::error('MyFatoorah refund failed: Payment ID is required');
+                return false;
             }
+
+            if ($amount <= 0) {
+                Log::error('MyFatoorah refund failed: Refund amount must be greater than 0');
+                return false;
+            }
+
+            $paymentId = $transactionId; // Transaction ID is the payment ID for MyFatoorah
+            $refundReason = 'Customer requested refund';
+            $refundChargeOnCustomer = false;
 
             // Prepare refund data
             $refundData = [
                 'PaymentId' => $paymentId,
                 'RefundChargeOnCustomer' => $refundChargeOnCustomer ? 'true' : 'false',
                 'ServiceChargeOnCustomer' => 0,
-                'Amount' => number_format($refundAmount, 2, '.', ''),
+                'Amount' => number_format($amount, 2, '.', ''),
                 'Note' => $refundReason,
                 'RefundReason' => $refundReason,
             ];
@@ -239,47 +251,48 @@ class MyfatoorahGateway extends AbstractGateway
             $responseData = $response->json();
 
             Log::info('MyFatoorah refund request', [
+                'payment_id' => $paymentId,
+                'amount' => $amount,
                 'request' => $refundData,
                 'response' => $responseData
             ]);
 
             if ($response->successful() && isset($responseData['Data']['RefundId'])) {
                 $refundData = $responseData['Data'];
-
-                return new PaymentResponse(
-                    success: true,
-                    transactionId: $refundData['RefundId'] ?? null,
-                    message: 'Refund processed successfully',
-                    data: [
-                        'refund_id' => $refundData['RefundId'] ?? null,
-                        'refund_status' => 'processed',
-                        'refund_amount' => $refundData['Amount'] ?? $refundAmount,
-                        'refund_date' => $refundData['RefundDate'] ?? null,
-                        'payment_id' => $refundData['PaymentId'] ?? $paymentId,
-                    ]
-                );
+                Log::info('MyFatoorah refund processed successfully', [
+                    'payment_id' => $paymentId,
+                    'amount' => $amount,
+                    'refund_id' => $refundData['RefundId'] ?? null
+                ]);
+                return true;
             }
 
             $errorMessage = $responseData['ErrorMessage'] ?? 'Refund failed';
-
-            return new PaymentResponse(
-                success: false,
-                message: $errorMessage,
-                errorCode: $responseData['ErrorCode'] ?? 'REFUND_ERROR',
-                data: $responseData
-            );
+            Log::error('MyFatoorah refund failed', [
+                'payment_id' => $paymentId,
+                'amount' => $amount,
+                'error' => $errorMessage,
+                'response' => $responseData
+            ]);
+            return false;
 
         } catch (\Exception $e) {
             Log::error('MyFatoorah refund error', [
+                'transaction_id' => $transactionId,
+                'amount' => $amount,
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString()
             ]);
-
-            return new PaymentResponse(
-                success: false,
-                message: 'Refund processing failed: ' . $e->getMessage()
-            );
+            return false;
         }
+    }
+
+    /**
+     * Check if gateway supports refunds
+     */
+    public function supportsRefund(): bool
+    {
+        return true;
     }
 
     /**
@@ -359,8 +372,8 @@ class MyfatoorahGateway extends AbstractGateway
                     'Quantity' => 1,
                     'UnitPrice' => $data['amount']
                 ]],
-                'CallBackUrl' => $data['callback_url'] ?? $this->config->get('webhook_url'),
-                'ErrorUrl' => $data['error_url'] ?? $this->config->get('error_url'),
+                'CallBackUrl' => $data['callback_url'] ?? $this->config['webhook_url'] ?? '',
+                'ErrorUrl' => $data['error_url'] ?? $this->config['error_url'] ?? '',
                 'Language' => $data['language'] ?? 'en', // en or ar
                 'ExpiryTime' => $data['expiry_time'] ?? 1440, // 24 hours in minutes
             ];
@@ -424,8 +437,8 @@ class MyfatoorahGateway extends AbstractGateway
                 'CustomerMobile' => $data['customer_phone'] ?? '',
                 'CustomerReference' => $data['customer_reference'] ?? uniqid(),
                 'DisplayCurrencyIso' => $data['currency'] ?? 'SAR',
-                'CallBackUrl' => $data['callback_url'] ?? $this->config->get('webhook_url'),
-                'ErrorUrl' => $data['error_url'] ?? $this->config->get('error_url'),
+                'CallBackUrl' => $data['callback_url'] ?? $this->config['webhook_url'] ?? '',
+                'ErrorUrl' => $data['error_url'] ?? $this->config['error_url'] ?? '',
                 'Language' => $data['language'] ?? 'en',
                 'UserDefinedField' => $data['user_defined_field'] ?? '',
                 'DirectPaymentURL' => $data['redirect_url'] ?? null,
@@ -492,8 +505,8 @@ class MyfatoorahGateway extends AbstractGateway
             'CustomerReference' => $request->orderId ?? 'INV-' . uniqid(),
             'InvoiceValue' => $request->amount,
             'DisplayCurrencyIso' => $request->currency,
-            'CallBackUrl' => $request->notifyUrl ?? $this->config->get('webhook_url'),
-            'ErrorUrl' => $request->cancelUrl ?? $this->config->get('error_url'),
+            'CallBackUrl' => $request->notifyUrl ?? $this->config['webhook_url'] ?? '',
+            'ErrorUrl' => $request->cancelUrl ?? $this->config['error_url'] ?? '',
             'Language' => $request->metadata['language'] ?? 'en', // en or ar
             'ExpiryTime' => $request->metadata['expiry_time'] ?? 1440, // 24 hours
         ];

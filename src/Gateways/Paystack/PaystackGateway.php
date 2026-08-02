@@ -2,20 +2,15 @@
 
 namespace Mdiqbal\LaravelPayments\Gateways\Paystack;
 
+use Illuminate\Support\Facades\Http;
 use Mdiqbal\LaravelPayments\Core\AbstractGateway;
 use Mdiqbal\LaravelPayments\DTO\PaymentRequest;
 use Mdiqbal\LaravelPayments\DTO\PaymentResponse;
 use Mdiqbal\LaravelPayments\Exceptions\PaymentException;
-use Oladejo\LaravelPaystack\Paystack;
-use Oladejo\LaravelPaystack\Transaction as PaystackTransaction;
-use Oladejo\LaravelPaystack\Customer as PaystackCustomer;
-use Oladejo\LaravelPaystack\Refund as PaystackRefund;
-use Oladejo\LaravelPaystack\Plan as PaystackPlan;
-use Oladejo\LaravelPaystack\Subscription as PaystackSubscription;
 
 class PaystackGateway extends AbstractGateway
 {
-    private ?Paystack $paystack = null;
+    private const PAYSTACK_BASE_URL = 'https://api.paystack.co';
 
     public function gatewayName(): string
     {
@@ -25,7 +20,33 @@ class PaystackGateway extends AbstractGateway
     public function __construct(array $config = [])
     {
         parent::__construct($config);
-        $this->initializePaystack();
+    }
+
+    /**
+     * Make HTTP request to Paystack API
+     */
+    protected function makePaystackRequest(string $method, string $endpoint, array $data = []): array
+    {
+        $secretKey = $this->getSecretKey();
+
+        if (!$secretKey) {
+            throw new PaymentException('Paystack secret key not configured');
+        }
+
+        $url = self::PAYSTACK_BASE_URL . $endpoint;
+
+        $response = Http::withHeaders([
+            'Authorization' => 'Bearer ' . $secretKey,
+            'Content-Type' => 'application/json',
+        ])->{strtolower($method)}($url, $data);
+
+        if (!$response->successful()) {
+            $error = $response->json();
+            $message = $error['message'] ?? 'Paystack API request failed';
+            throw new PaymentException($message);
+        }
+
+        return $response->json();
     }
 
     public function pay(PaymentRequest $request): PaymentResponse
@@ -41,17 +62,17 @@ class PaystackGateway extends AbstractGateway
             $transaction = $this->createTransaction($request);
 
             $this->log('info', 'Paystack transaction created', [
-                'reference' => $transaction->reference,
-                'authorization_url' => $transaction->authorization_url,
+                'reference' => $transaction['reference'],
+                'authorization_url' => $transaction['authorization_url'],
                 'amount' => $request->getAmount(),
                 'currency' => $request->getCurrency()
             ]);
 
-            return PaymentResponse::redirect($transaction->authorization_url, [
-                'transaction_id' => $transaction->reference,
-                'reference' => $transaction->reference,
-                'access_code' => $transaction->access_code,
-                'authorization_url' => $transaction->authorization_url,
+            return PaymentResponse::redirect($transaction['authorization_url'], [
+                'transaction_id' => $transaction['reference'],
+                'reference' => $transaction['reference'],
+                'access_code' => $transaction['access_code'],
+                'authorization_url' => $transaction['authorization_url'],
                 'status' => 'created',
                 'message' => 'Transaction created successfully'
             ]);
@@ -76,13 +97,14 @@ class PaystackGateway extends AbstractGateway
             }
 
             // Verify transaction from Paystack
-            $transaction = $this->getPaystack()->transaction->verify($reference);
+            $response = $this->makePaystackRequest('GET', '/transaction/verify/' . $reference);
+            $transaction = $response['data'] ?? [];
 
-            if (!$transaction->status) {
+            if (!isset($transaction['status'])) {
                 throw new PaymentException('Transaction verification failed');
             }
 
-            $status = match($transaction->status) {
+            $status = match($transaction['status']) {
                 'success' => 'completed',
                 'failed' => 'failed',
                 'abandoned' => 'canceled',
@@ -93,30 +115,30 @@ class PaystackGateway extends AbstractGateway
             $this->log('info', 'Paystack transaction verified', [
                 'reference' => $reference,
                 'status' => $status,
-                'amount' => $transaction->amount / 100,
-                'currency' => $transaction->currency
+                'amount' => ($transaction['amount'] ?? 0) / 100,
+                'currency' => $transaction['currency'] ?? 'NGN'
             ]);
 
             return new PaymentResponse(
-                success: $transaction->status === 'success',
-                transactionId: $transaction->reference,
+                success: $transaction['status'] === 'success',
+                transactionId: $transaction['reference'] ?? $reference,
                 status: $status,
                 data: [
-                    'reference' => $transaction->reference,
-                    'amount' => $transaction->amount / 100, // Convert from kobo/cents
-                    'currency' => $transaction->currency,
-                    'gateway_response' => $transaction->gateway_response,
-                    'paid_at' => $transaction->paid_at,
-                    'channel' => $transaction->channel,
-                    'ip_address' => $transaction->ip_address,
-                    'plan' => $transaction->plan,
-                    'plan_object' => $transaction->plan_object,
-                    'customer' => $transaction->customer,
-                    'authorization' => $transaction->authorization,
-                    'fees' => $transaction->fees / 100,
-                    'log' => $transaction->log,
-                    'requested_amount' => $transaction->requested_amount / 100,
-                    'fees_split' => $transaction->fees_split ?? [],
+                    'reference' => $transaction['reference'] ?? $reference,
+                    'amount' => ($transaction['amount'] ?? 0) / 100, // Convert from kobo/cents
+                    'currency' => $transaction['currency'] ?? 'NGN',
+                    'gateway_response' => $transaction['gateway_response'] ?? null,
+                    'paid_at' => $transaction['paid_at'] ?? null,
+                    'channel' => $transaction['channel'] ?? null,
+                    'ip_address' => $transaction['ip_address'] ?? null,
+                    'plan' => $transaction['plan'] ?? null,
+                    'plan_object' => $transaction['plan_object'] ?? null,
+                    'customer' => $transaction['customer'] ?? null,
+                    'authorization' => $transaction['authorization'] ?? null,
+                    'fees' => ($transaction['fees'] ?? 0) / 100,
+                    'log' => $transaction['log'] ?? null,
+                    'requested_amount' => ($transaction['requested_amount'] ?? 0) / 100,
+                    'fees_split' => $transaction['fees_split'] ?? [],
                     'verification_data' => $payload
                 ]
             );
@@ -136,10 +158,10 @@ class PaystackGateway extends AbstractGateway
             $refund = $this->createRefund($transactionId, $amount);
 
             $this->log('info', 'Paystack refund processed', [
-                'refund_id' => $refund->id,
+                'refund_id' => $refund['id'] ?? null,
                 'transaction_id' => $transactionId,
                 'amount' => $amount,
-                'status' => $refund->status
+                'status' => $refund['status'] ?? null
             ]);
 
             return true;
@@ -160,158 +182,146 @@ class PaystackGateway extends AbstractGateway
     }
 
     /**
-     * Create a customer in Paystack
+     * Get secret key based on mode
      */
-    public function createCustomer(array $customerData): string
+    private function getSecretKey(): ?string
     {
-        try {
-            $customer = $this->getPaystack()->customer->create($customerData);
-            return $customer->id;
-        } catch (\Exception $e) {
-            throw new PaymentException('Paystack customer creation failed: ' . $e->getMessage());
-        }
+        return $this->getModeConfig('secret_key');
     }
 
     /**
-     * Create a subscription plan
+     * Get public key based on mode
      */
-    public function createPlan(array $planData): string
+    public function getPublicKey(): ?string
     {
-        try {
-            $plan = $this->getPaystack()->plan->create($planData);
-            return $plan->id;
-        } catch (\Exception $e) {
-            throw new PaymentException('Paystack plan creation failed: ' . $e->getMessage());
+        $secretKey = $this->getSecretKey();
+        
+        if (!$secretKey) {
+            return null;
         }
+
+        // Paystack public key is derived from secret key
+        // sk_test_xxx -> pk_test_xxx, sk_live_xxx -> pk_live_xxx
+        if (str_starts_with($secretKey, 'sk_test_')) {
+            return str_replace('sk_test_', 'pk_test_', $secretKey);
+        } elseif (str_starts_with($secretKey, 'sk_live_')) {
+            return str_replace('sk_live_', 'pk_live_', $secretKey);
+        }
+
+        return null;
     }
 
     /**
-     * Create a subscription
+     * Create Paystack transaction
      */
-    public function createSubscription(array $subscriptionData): PaymentResponse
+    private function createTransaction(PaymentRequest $request): array
     {
-        try {
-            $subscription = $this->getPaystack()->subscription->create($subscriptionData);
+        $amountInKobo = (int) round($request->getAmount() * 100);
+        $metadata = $request->getMetadata();
+        $reference = $request->getTransactionId() ?? $this->generateOrderId();
 
-            return new PaymentResponse(
-                success: true,
-                transactionId: $subscription->subscription_code,
-                status: $subscription->status,
-                data: [
-                    'subscription_code' => $subscription->subscription_code,
-                    'email_token' => $subscription->email_token,
-                    'customer' => $subscription->customer,
-                    'plan' => $subscription->plan,
-                    'authorization' => $subscription->authorization,
-                    'start_date' => $subscription->start_date,
-                    'next_payment_date' => $subscription->next_payment_date,
-                    'invoice_url' => $subscription->invoice_url ?? null,
-                    'subscription_code' => $subscription->subscription_code
-                ]
-            );
-        } catch (\Exception $e) {
-            throw new PaymentException('Paystack subscription creation failed: ' . $e->getMessage());
+        $currency = strtoupper($request->getCurrency() ?? 'ZAR'); // Default to ZAR
+        
+        $transactionData = [
+            'amount' => $amountInKobo,
+            'email' => $metadata['email'] ?? 'customer@example.com',
+            'reference' => $reference,
+            'currency' => $currency,
+            'callback_url' => $request->getReturnUrl() ?? route('payment.callback'),
+        ];
+        
+        // Paystack supports: NGN, GHS, ZAR, USD
+        // Currency is always included (defaults to ZAR if not specified)
+
+        // Add optional fields
+        if (isset($metadata['callback_url'])) {
+            $transactionData['callback_url'] = $metadata['callback_url'];
         }
+
+        if (isset($metadata['plan'])) {
+            $transactionData['plan'] = $metadata['plan'];
+        }
+
+        if (isset($metadata['metadata']) && is_array($metadata['metadata'])) {
+            $transactionData['metadata'] = $metadata['metadata'];
+        } else {
+            $transactionData['metadata'] = [
+                'description' => $request->getDescription() ?? 'Payment',
+                'order_id' => $reference
+            ];
+        }
+
+        // Add customer details
+        if (isset($metadata['customer_code'])) {
+            $transactionData['customer'] = $metadata['customer_code'];
+        }
+
+        if (isset($metadata['subaccount'])) {
+            $transactionData['subaccount'] = $metadata['subaccount'];
+        }
+
+        if (isset($metadata['transaction_charge'])) {
+            $transactionData['transaction_charge'] = $metadata['transaction_charge'];
+        }
+
+        if (isset($metadata['bearer'])) {
+            $transactionData['bearer'] = $metadata['bearer'];
+        }
+
+        // Add channels
+        if (isset($metadata['channels']) && is_array($metadata['channels'])) {
+            $transactionData['channels'] = $metadata['channels'];
+        }
+
+        // Add split information
+        if (isset($metadata['split_code'])) {
+            $transactionData['split_code'] = $metadata['split_code'];
+        }
+
+        // Add due date for scheduled payments
+        if (isset($metadata['due_date'])) {
+            $transactionData['due_date'] = $metadata['due_date'];
+        }
+
+        $response = $this->makePaystackRequest('POST', '/transaction/initialize', $transactionData);
+        return $response['data'] ?? [];
     }
 
     /**
-     * Fetch a transaction
+     * Create refund
      */
-    public function fetchTransaction(string $reference): PaymentResponse
+    private function createRefund(string $reference, float $amount): array
     {
-        try {
-            $transaction = $this->getPaystack()->transaction->fetch($reference);
+        $refundData = [
+            'transaction' => $reference,
+        ];
 
-            $status = match($transaction->status) {
-                'success' => 'completed',
-                'failed' => 'failed',
-                'abandoned' => 'canceled',
-                'reversed' => 'refunded',
-                default => 'unknown'
-            };
-
-            return new PaymentResponse(
-                success: $transaction->status === 'success',
-                transactionId: $transaction->reference,
-                status: $status,
-                data: [
-                    'reference' => $transaction->reference,
-                    'amount' => $transaction->amount / 100,
-                    'currency' => $transaction->currency,
-                    'gateway_response' => $transaction->gateway_response,
-                    'paid_at' => $transaction->paid_at,
-                    'channel' => $transaction->channel,
-                    'ip_address' => $transaction->ip_address,
-                    'customer' => $transaction->customer,
-                    'authorization' => $transaction->authorization
-                ]
-            );
-        } catch (\Exception $e) {
-            throw new PaymentException('Failed to fetch Paystack transaction: ' . $e->getMessage());
+        // Refund specific amount if provided (partial refund)
+        if ($amount > 0) {
+            $refundData['amount'] = (int) round($amount * 100);
         }
+
+        // Add currency if needed (defaults to NGN)
+        $refundData['currency'] = 'NGN';
+
+        $response = $this->makePaystackRequest('POST', '/refund', $refundData);
+        return $response['data'] ?? [];
     }
 
     /**
-     * Charge authorization (for recurring payments)
+     * Get supported payment methods
      */
-    public function chargeAuthorization(array $chargeData): PaymentResponse
+    public function getSupportedPaymentMethods(): array
     {
-        try {
-            $charge = $this->getPaystack()->transaction->chargeAuthorization($chargeData);
-
-            return new PaymentResponse(
-                success: $charge->status,
-                transactionId: $charge->reference,
-                status: $charge->status ? 'completed' : 'pending',
-                data: [
-                    'reference' => $charge->reference,
-                    'amount' => $charge->amount / 100,
-                    'currency' => $charge->currency,
-                    'customer' => $charge->customer,
-                    'authorization' => $charge->authorization
-                ]
-            );
-        } catch (\Exception $e) {
-            throw new PaymentException('Failed to charge Paystack authorization: ' . $e->getMessage());
-        }
-    }
-
-    /**
-     * Create transfer recipient
-     */
-    public function createTransferRecipient(array $recipientData): string
-    {
-        try {
-            $recipient = $this->getPaystack()->transferRecipient->create($recipientData);
-            return $recipient->recipient_code;
-        } catch (\Exception $e) {
-            throw new PaymentException('Failed to create Paystack transfer recipient: ' . $e->getMessage());
-        }
-    }
-
-    /**
-     * Initialize transfer
-     */
-    public function initializeTransfer(array $transferData): PaymentResponse
-    {
-        try {
-            $transfer = $this->getPaystack()->transfer->initialize($transferData);
-
-            return new PaymentResponse(
-                success: true,
-                transactionId: $transfer->transfer_code,
-                status: 'initialized',
-                data: [
-                    'transfer_code' => $transfer->transfer_code,
-                    'amount' => $transfer->amount / 100,
-                    'currency' => $transfer->currency,
-                    'recipient' => $transfer->recipient,
-                    'status' => $transfer->status
-                ]
-            );
-        } catch (\Exception $e) {
-            throw new PaymentException('Failed to initialize Paystack transfer: ' . $e->getMessage());
-        }
+        return [
+            'card',
+            'bank',
+            'ussd',
+            'qr',
+            'mobile_money',
+            'bank_transfer',
+            'eft'
+        ];
     }
 
     /**
@@ -401,311 +411,40 @@ class PaystackGateway extends AbstractGateway
     }
 
     /**
-     * Initialize Paystack API
+     * Fetch a transaction
      */
-    private function initializePaystack(): void
-    {
-        $secretKey = $this->getSecretKey();
-
-        if ($secretKey) {
-            $this->paystack = new Paystack($secretKey);
-        }
-    }
-
-    /**
-     * Get Paystack instance
-     */
-    private function getPaystack(): Paystack
-    {
-        if ($this->paystack === null) {
-            $secretKey = $this->getSecretKey();
-
-            if (!$secretKey) {
-                throw new PaymentException('Paystack secret key not configured');
-            }
-
-            $this->paystack = new Paystack($secretKey);
-        }
-
-        return $this->paystack;
-    }
-
-    /**
-     * Get secret key based on mode
-     */
-    private function getSecretKey(): ?string
-    {
-        return $this->getModeConfig('secret_key');
-    }
-
-    /**
-     * Get public key based on mode
-     */
-    public function getPublicKey(): ?string
-    {
-        // Paystack typically uses the same key format
-        return $this->getSecretKey();
-    }
-
-    /**
-     * Create Paystack transaction
-     */
-    private function createTransaction(PaymentRequest $request): PaystackTransaction
-    {
-        $amountInKobo = (int) round($request->getAmount() * 100);
-        $currency = strtoupper($request->getCurrency() ?? 'NGN');
-        $metadata = $request->getMetadata();
-        $reference = $request->getTransactionId() ?? $this->generateOrderId();
-
-        $transactionData = [
-            'amount' => $amountInKobo,
-            'email' => $metadata['email'] ?? 'customer@example.com',
-            'reference' => $reference,
-            'currency' => $currency,
-            'callback_url' => $request->getReturnUrl() ?? route('payment.callback'),
-        ];
-
-        // Add optional fields
-        if (isset($metadata['callback_url'])) {
-            $transactionData['callback_url'] = $metadata['callback_url'];
-        }
-
-        if (isset($metadata['plan'])) {
-            $transactionData['plan'] = $metadata['plan'];
-        }
-
-        if (isset($metadata['metadata']) && is_array($metadata['metadata'])) {
-            $transactionData['metadata'] = $metadata['metadata'];
-        } else {
-            $transactionData['metadata'] = [
-                'description' => $request->getDescription() ?? 'Payment',
-                'order_id' => $reference
-            ];
-        }
-
-        // Add customer details
-        if (isset($metadata['customer_code'])) {
-            $transactionData['customer'] = $metadata['customer_code'];
-        }
-
-        if (isset($metadata['subaccount'])) {
-            $transactionData['subaccount'] = $metadata['subaccount'];
-        }
-
-        if (isset($metadata['transaction_charge'])) {
-            $transactionData['transaction_charge'] = $metadata['transaction_charge'];
-        }
-
-        if (isset($metadata['bearer'])) {
-            $transactionData['bearer'] = $metadata['bearer'];
-        }
-
-        // Add channels
-        if (isset($metadata['channels']) && is_array($metadata['channels'])) {
-            $transactionData['channels'] = $metadata['channels'];
-        }
-
-        // Add split information
-        if (isset($metadata['split_code'])) {
-            $transactionData['split_code'] = $metadata['split_code'];
-        }
-
-        // Add due date for scheduled payments
-        if (isset($metadata['due_date'])) {
-            $transactionData['due_date'] = $metadata['due_date'];
-        }
-
-        return $this->getPaystack()->transaction->initialize($transactionData);
-    }
-
-    /**
-     * Create refund
-     */
-    private function createRefund(string $reference, float $amount): PaystackRefund
-    {
-        $refundData = [
-            'transaction' => $reference,
-        ];
-
-        // Refund specific amount if provided (partial refund)
-        if ($amount > 0) {
-            $refundData['amount'] = (int) round($amount * 100);
-        }
-
-        // Add currency if needed (defaults to NGN)
-        $refundData['currency'] = 'NGN';
-
-        return $this->getPaystack()->refund->create($refundData);
-    }
-
-    /**
-     * Get supported payment methods
-     */
-    public function getSupportedPaymentMethods(): array
-    {
-        return [
-            'card',
-            'bank',
-            'ussd',
-            'qr',
-            'mobile_money',
-            'bank_transfer',
-            'eft'
-        ];
-    }
-
-    /**
-     * Create payment page with custom settings
-     */
-    public function createPaymentPage(PaymentRequest $request): PaymentResponse
+    public function fetchTransaction(string $reference): PaymentResponse
     {
         try {
-            $metadata = $request->getMetadata();
+            $response = $this->makePaystackRequest('GET', '/transaction/verify/' . $reference);
+            $transaction = $response['data'] ?? [];
 
-            $pageData = [
-                'name' => $metadata['page_name'] ?? 'Payment Page',
-                'description' => $request->getDescription() ?? 'Payment',
-                'amount' => (int) round($request->getAmount() * 100),
-                'redirect_url' => $request->getReturnUrl() ?? route('payment.success'),
-                'metadata' => $metadata['metadata'] ?? [],
-                'channels' => $metadata['channels'] ?? ['card', 'bank'],
-            ];
-
-            if (isset($metadata['split_code'])) {
-                $pageData['split_code'] = $metadata['split_code'];
-            }
-
-            if (isset($metadata['logo'])) {
-                $pageData['logo'] = $metadata['logo'];
-            }
-
-            $page = $this->getPaystack()->page->create($pageData);
-
-            return PaymentResponse::redirect($page->url, [
-                'transaction_id' => $page->slug,
-                'page_id' => $page->id,
-                'page_url' => $page->url,
-                'status' => 'created',
-                'message' => 'Payment page created successfully'
-            ]);
-
-        } catch (\Exception $e) {
-            throw new PaymentException('Failed to create Paystack payment page: ' . $e->getMessage());
-        }
-    }
-
-    /**
-     * Create bulk charges
-     */
-    public function createBulkCharge(array $charges): PaymentResponse
-    {
-        try {
-            $bulkCharge = $this->getPaystack()->bulkCharge->create([
-                'charges' => $charges,
-                'callback_url' => route('payment.bulk.callback')
-            ]);
+            $status = match($transaction['status'] ?? 'unknown') {
+                'success' => 'completed',
+                'failed' => 'failed',
+                'abandoned' => 'canceled',
+                'reversed' => 'refunded',
+                default => 'unknown'
+            };
 
             return new PaymentResponse(
-                success: true,
-                transactionId: $bulkCharge->batch_code,
-                status: 'created',
+                success: ($transaction['status'] ?? '') === 'success',
+                transactionId: $transaction['reference'] ?? $reference,
+                status: $status,
                 data: [
-                    'batch_code' => $bulkCharge->batch_code,
-                    'total_charges' => $bulkCharge->total_charges,
-                    'total_amount' => $bulkCharge->total_amount / 100,
-                    'currency' => $bulkCharge->currency ?? 'NGN'
+                    'reference' => $transaction['reference'] ?? $reference,
+                    'amount' => ($transaction['amount'] ?? 0) / 100,
+                    'currency' => $transaction['currency'] ?? 'NGN',
+                    'gateway_response' => $transaction['gateway_response'] ?? null,
+                    'paid_at' => $transaction['paid_at'] ?? null,
+                    'channel' => $transaction['channel'] ?? null,
+                    'ip_address' => $transaction['ip_address'] ?? null,
+                    'customer' => $transaction['customer'] ?? null,
+                    'authorization' => $transaction['authorization'] ?? null
                 ]
             );
         } catch (\Exception $e) {
-            throw new PaymentException('Failed to create Paystack bulk charge: ' . $e->getMessage());
-        }
-    }
-
-    /**
-     * Get transaction timeline
-     */
-    public function getTransactionTimeline(string $reference): PaymentResponse
-    {
-        try {
-            $timeline = $this->getPaystack()->transaction->timeline($reference);
-
-            return new PaymentResponse(
-                success: true,
-                transactionId: $reference,
-                status: 'completed',
-                data: [
-                    'timeline' => $timeline->timeline ?? [],
-                    'reference' => $reference
-                ]
-            );
-        } catch (\Exception $e) {
-            throw new PaymentException('Failed to fetch Paystack transaction timeline: ' . $e->getMessage());
-        }
-    }
-
-    /**
-     * Get transaction totals
-     */
-    public function getTransactionTotals(array $params = []): array
-    {
-        try {
-            $totals = $this->getPaystack()->transaction->totals($params);
-
-            return [
-                'total_transactions' => $totals->total_transactions ?? 0,
-                'total_volume' => ($totals->total_volume ?? 0) / 100,
-                'pending_transfers' => ($totals->pending_transfers ?? 0) / 100,
-                'pending_transfers_count' => $totals->pending_transfers_count ?? 0,
-            ];
-        } catch (\Exception $e) {
-            throw new PaymentException('Failed to fetch Paystack transaction totals: ' . $e->getMessage());
-        }
-    }
-
-    /**
-     * Export transactions
-     */
-    public function exportTransactions(array $params = []): string
-    {
-        try {
-            $response = $this->getPaystack()->transaction->export($params);
-            return $response->path ?? '';
-        } catch (\Exception $e) {
-            throw new PaymentException('Failed to export Paystack transactions: ' . $e->getMessage());
-        }
-    }
-
-    /**
-     * Resolve card BIN
-     */
-    public function resolveCardBin(string $bin): array
-    {
-        try {
-            $resolution = $this->getPaystack()->misc->resolveCardBin($bin);
-
-            return [
-                'bin' => $resolution->bin,
-                'brand' => $resolution->brand,
-                'type' => $resolution->type,
-                'country' => $resolution->country,
-                'country_code' => $resolution->country_code,
-                'bank' => $resolution->bank,
-            ];
-        } catch (\Exception $e) {
-            throw new PaymentException('Failed to resolve Paystack card BIN: ' . $e->getMessage());
-        }
-    }
-
-    /**
-     * List banks
-     */
-    public function listBanks(string $country = 'nigeria'): array
-    {
-        try {
-            $banks = $this->getPaystack()->misc->listBanks(['country' => $country]);
-            return $banks->data ?? [];
-        } catch (\Exception $e) {
-            throw new PaymentException('Failed to list Paystack banks: ' . $e->getMessage());
+            throw new PaymentException('Failed to fetch Paystack transaction: ' . $e->getMessage());
         }
     }
 }

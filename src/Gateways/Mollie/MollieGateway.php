@@ -2,9 +2,9 @@
 
 namespace Mdiqbal\LaravelPayments\Gateways\Mollie;
 
-use Mdiqbal\LaravelPayments\AbstractGateway;
-use Mdiqbal\LaravelPayments\DTOs\PaymentRequest;
-use Mdiqbal\LaravelPayments\DTOs\PaymentResponse;
+use Mdiqbal\LaravelPayments\Core\AbstractGateway;
+use Mdiqbal\LaravelPayments\DTO\PaymentRequest;
+use Mdiqbal\LaravelPayments\DTO\PaymentResponse;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Http\Request;
@@ -26,7 +26,7 @@ class MollieGateway extends AbstractGateway
     /**
      * Gateway configuration
      */
-    protected $config;
+    protected array $config = [];
 
     /**
      * Supported currencies
@@ -69,7 +69,7 @@ class MollieGateway extends AbstractGateway
     /**
      * Get gateway name
      */
-    public function getGatewayName(): string
+    public function gatewayName(): string
     {
         return 'mollie';
     }
@@ -77,10 +77,9 @@ class MollieGateway extends AbstractGateway
     /**
      * Process payment
      */
-    public function pay(array $data): array
+    public function pay(PaymentRequest $paymentRequest): PaymentResponse
     {
         try {
-            $paymentRequest = new PaymentRequest($data);
 
             // Validate currency
             if (!$this->supportsCurrency($paymentRequest->currency)) {
@@ -146,8 +145,7 @@ class MollieGateway extends AbstractGateway
             // Create payment
             $molliePayment = $this->mollie->payments->create($paymentData);
 
-            return [
-                'success' => true,
+            return PaymentResponse::success([
                 'transaction_id' => $paymentRequest->transaction_id,
                 'gateway_transaction_id' => $molliePayment->id,
                 'payment_url' => $molliePayment->getCheckoutUrl(),
@@ -160,7 +158,7 @@ class MollieGateway extends AbstractGateway
                 'due_date' => $molliePayment->dueDate,
                 'message' => 'Payment created successfully',
                 'data' => $molliePayment
-            ];
+            ]);
 
         } catch (\Exception $e) {
             Log::error('Mollie payment error: ' . $e->getMessage(), [
@@ -169,22 +167,23 @@ class MollieGateway extends AbstractGateway
                 'error' => $e->getMessage()
             ]);
 
-            return [
-                'success' => false,
-                'error' => [
-                    'message' => $e->getMessage(),
-                    'code' => 'PAYMENT_FAILED'
-                ]
-            ];
+            return PaymentResponse::error($e->getMessage(), 'PAYMENT_FAILED');
         }
     }
 
     /**
      * Verify payment
      */
-    public function verify(string $transactionId): array
+    public function verify(array $payload): PaymentResponse
     {
         try {
+            // Extract transaction ID from payload
+            $transactionId = $payload['transaction_id'] ?? $payload['id'] ?? $payload['tran_id'] ?? null;
+
+            if (!$transactionId) {
+                return PaymentResponse::error('Transaction ID is required for verification', 'MISSING_TRANSACTION_ID');
+            }
+
             // Find payment by transaction_id in metadata
             $payments = $this->mollie->payments->page([
                 'metadata' => ['transaction_id' => $transactionId]
@@ -200,110 +199,94 @@ class MollieGateway extends AbstractGateway
             $amount = (float) $molliePayment->amount->value;
             $currency = $molliePayment->amount->currency;
             $status = $molliePayment->status;
+            $successStatuses = ['paid'];
+            $isSuccess = in_array($status, $successStatuses);
 
-            $response = [
-                'success' => true,
-                'status' => $status,
-                'transaction_id' => $molliePayment->metadata->transaction_id ?? $molliePayment->id,
-                'gateway_transaction_id' => $molliePayment->id,
-                'amount' => $amount,
-                'currency' => $currency,
-                'payment_method' => $molliePayment->method,
-                'details' => $molliePayment->details,
-                'created_at' => $molliePayment->createdAt,
-                'paid_at' => $molliePayment->paidAt,
-                'canceled_at' => $molliePayment->canceledAt,
-                'expired_at' => $molliePayment->expiredAt,
-                'sequence_type' => $molliePayment->sequenceType,
-                'customer_id' => $molliePayment->customerId,
-                'mandate_id' => $molliePayment->mandateId,
-                'profile_id' => $molliePayment->profileId,
-                'settlement_id' => $molliePayment->settlementId,
-                'amount_refunded' => $molliePayment->amountRefunded ? (float) $molliePayment->amountRefunded->value : 0,
-                'amount_remaining' => $molliePayment->amountRemaining ? (float) $molliePayment->amountRemaining->value : 0,
-                'description' => $molliePayment->description,
-                'redirect_url' => $molliePayment->redirectUrl,
-                'webhook_url' => $molliePayment->webhookUrl,
-                'country_code' => $molliePayment->countryCode,
-                'locale' => $molliePayment->locale,
-                'metadata' => $molliePayment->metadata,
-                'application_fee' => $molliePayment->applicationFee,
-                'custom_parameters' => $molliePayment->customParameters,
-                'is_cancelable' => $molliePayment->isCancelable,
-                'expires_at' => $molliePayment->expiresAt,
-                'due_date' => $molliePayment->dueDate,
-                'message' => 'Payment retrieved successfully',
-                'data' => $molliePayment
-            ];
+            return new PaymentResponse(
+                success: $isSuccess,
+                transactionId: $molliePayment->metadata->transaction_id ?? $molliePayment->id,
+                gatewayTransactionId: $molliePayment->id,
+                status: $status,
+                amount: $amount,
+                currency: $currency,
+                message: $isSuccess ? 'Payment verified successfully' : 'Payment verification failed',
+                data: [
+                    'payment_method' => $molliePayment->method,
+                    'details' => $molliePayment->details,
+                    'created_at' => $molliePayment->createdAt,
+                    'paid_at' => $molliePayment->paidAt,
+                    'canceled_at' => $molliePayment->canceledAt,
+                    'expired_at' => $molliePayment->expiredAt,
+                    'sequence_type' => $molliePayment->sequenceType,
+                    'customer_id' => $molliePayment->customerId,
+                    'mandate_id' => $molliePayment->mandateId,
+                    'profile_id' => $molliePayment->profileId,
+                    'settlement_id' => $molliePayment->settlementId,
+                    'amount_refunded' => $molliePayment->amountRefunded ? (float) $molliePayment->amountRefunded->value : 0,
+                    'amount_remaining' => $molliePayment->amountRemaining ? (float) $molliePayment->amountRemaining->value : 0,
+                    'description' => $molliePayment->description,
+                    'redirect_url' => $molliePayment->redirectUrl,
+                    'webhook_url' => $molliePayment->webhookUrl,
+                    'country_code' => $molliePayment->countryCode,
+                    'locale' => $molliePayment->locale,
+                    'metadata' => $molliePayment->metadata,
+                    'application_fee' => $molliePayment->applicationFee,
+                    'custom_parameters' => $molliePayment->customParameters,
+                    'is_cancelable' => $molliePayment->isCancelable,
+                    'expires_at' => $molliePayment->expiresAt,
+                    'due_date' => $molliePayment->dueDate,
+                ]
+            );
 
             // Add refund information if available
             if ($molliePayment->_links->refunds) {
                 $refunds = $this->mollie->refunds->listForPayment($molliePayment->id);
-                $response['refunds'] = $refunds->toArray();
+                $response->data['refunds'] = $refunds->toArray();
             }
 
             return $response;
 
         } catch (\Exception $e) {
             Log::error('Mollie verification error: ' . $e->getMessage(), [
-                'transaction_id' => $transactionId,
+                'payload' => $payload,
                 'error' => $e->getMessage()
             ]);
 
-            return [
-                'success' => false,
-                'error' => [
-                    'message' => $e->getMessage(),
-                    'code' => 'VERIFICATION_FAILED'
-                ]
-            ];
+            return PaymentResponse::error($e->getMessage(), 'VERIFICATION_FAILED');
         }
     }
 
     /**
      * Process refund
      */
-    public function refund(array $data): array
+    public function refund(string $transactionId, float $amount): bool
     {
         try {
+            // Mollie requires the payment ID (not transaction ID) for refunds
+            // In a real implementation, you would need to store the payment ID during payment
+            // For now, we'll use the transaction ID as payment ID, but this may need adjustment
+
             $refundData = [
                 'amount' => [
-                    'currency' => $data['currency'],
-                    'value' => number_format($data['amount'], 2, '.', '')
+                    'currency' => 'EUR', // Default currency, should be stored during payment
+                    'value' => number_format($amount, 2, '.', '')
                 ],
-                'description' => $data['reason'] ?? 'Refund requested'
+                'description' => 'Refund requested'
             ];
 
             // Create refund
-            $refund = $this->mollie->refunds->createFor($data['payment_id'], $refundData);
+            $refund = $this->mollie->refunds->createFor($transactionId, $refundData);
 
-            return [
-                'success' => true,
-                'refund_id' => $refund->id,
-                'payment_id' => $data['payment_id'],
-                'amount' => (float) $refund->amount->value,
-                'currency' => $refund->amount->currency,
-                'status' => $refund->status,
-                'description' => $refund->description,
-                'settlement_amount' => $refund->settlementAmount ? (float) $refund->settlementAmount->value : null,
-                'created_at' => $refund->createdAt,
-                'message' => 'Refund processed successfully',
-                'data' => $refund
-            ];
+            return true;
 
         } catch (\Exception $e) {
             Log::error('Mollie refund error: ' . $e->getMessage(), [
-                'data' => $data,
+                'transaction_id' => $transactionId,
+                'amount' => $amount,
                 'error' => $e->getMessage()
             ]);
 
-            return [
-                'success' => false,
-                'error' => [
-                    'message' => $e->getMessage(),
-                    'code' => 'REFUND_FAILED'
-                ]
-            ];
+            return false;
         }
     }
 

@@ -6,9 +6,9 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Mdiqbal\LaravelPayments\Contracts\PaymentGatewayInterface;
-use Mdiqbal\LaravelPayments\DTOs\PaymentRequest;
-use Mdiqbal\LaravelPayments\DTOs\PaymentResponse;
-use Mdiqbal\LaravelPayments\Gateways\AbstractGateway;
+use Mdiqbal\LaravelPayments\DTO\PaymentRequest;
+use Mdiqbal\LaravelPayments\DTO\PaymentResponse;
+use Mdiqbal\LaravelPayments\Core\AbstractGateway;
 
 class EasyPaisaGateway extends AbstractGateway implements PaymentGatewayInterface
 {
@@ -18,6 +18,14 @@ class EasyPaisaGateway extends AbstractGateway implements PaymentGatewayInterfac
     protected string $name = 'easypaisa';
 
     /**
+     * Get gateway name
+     */
+    public function gatewayName(): string
+    {
+        return $this->name;
+    }
+
+    /**
      * EasyPaisa API base URL
      */
     private string $baseUrl;
@@ -25,10 +33,10 @@ class EasyPaisaGateway extends AbstractGateway implements PaymentGatewayInterfac
     /**
      * Merchant credentials
      */
-    private string $merchantId;
-    private string $merchantPassword;
-    private string $storeId;
-    private string $accountNumber;
+    private string $merchantId = '';
+    private string $merchantPassword = '';
+    private string $storeId = '';
+    private string $accountNumber = '';
 
     /**
      * Test mode flag
@@ -48,10 +56,10 @@ class EasyPaisaGateway extends AbstractGateway implements PaymentGatewayInterfac
             $this->baseUrl = 'https://api.easypaisa.com.pk/epg';
         }
 
-        $this->merchantId = $config['merchant_id'] ?? config('payments.gateways.easypaisa.merchant_id');
-        $this->merchantPassword = $config['merchant_password'] ?? config('payments.gateways.easypaisa.merchant_password');
-        $this->storeId = $config['store_id'] ?? config('payments.gateways.easypaisa.store_id');
-        $this->accountNumber = $config['account_number'] ?? config('payments.gateways.easypaisa.account_number');
+        $this->merchantId = $config['merchant_id'] ?? config('payments.gateways.easypaisa.merchant_id') ?? '';
+        $this->merchantPassword = $config['merchant_password'] ?? config('payments.gateways.easypaisa.merchant_password') ?? '';
+        $this->storeId = $config['store_id'] ?? config('payments.gateways.easypaisa.store_id') ?? '';
+        $this->accountNumber = $config['account_number'] ?? config('payments.gateways.easypaisa.account_number') ?? '';
 
         parent::__construct($config);
     }
@@ -328,30 +336,32 @@ class EasyPaisaGateway extends AbstractGateway implements PaymentGatewayInterfac
     }
 
     /**
-     * {@inheritdoc}
+     * Process refund through EasyPaisa
+     * Note: Implementation limitations - EasyPaisa requires the original transaction ID
+     * and supports refunds with proper authentication.
      */
-    public function refund(array $data): PaymentResponse
+    public function refund(string $transactionId, float $amount): bool
     {
         try {
             $this->validateCredentials();
 
-            $transactionId = $data['transaction_id'] ?? $data['payment_id'] ?? null;
-            $refundAmount = $data['amount'] ?? null;
-            $reason = $data['reason'] ?? 'Customer requested refund';
-
             if (!$transactionId) {
-                return new PaymentResponse(
-                    success: false,
-                    message: 'Transaction ID is required for refund',
-                    code: 400
-                );
+                Log::error('EasyPaisa refund failed: Transaction ID is required');
+                return false;
             }
+
+            if ($amount <= 0) {
+                Log::error('EasyPaisa refund failed: Refund amount must be greater than 0');
+                return false;
+            }
+
+            $reason = 'Customer requested refund';
 
             $requestData = [
                 'merchantId' => $this->merchantId,
                 'token' => $this->generateToken(),
                 'originalTransactionId' => $transactionId,
-                'refundAmount' => $refundAmount ? number_format($refundAmount, 2, '.', '') : '',
+                'refundAmount' => number_format($amount, 2, '.', ''),
                 'refundReason' => $reason,
                 'refundTransactionId' => 'REF_' . time() . '_' . Str::random(6),
             ];
@@ -362,40 +372,48 @@ class EasyPaisaGateway extends AbstractGateway implements PaymentGatewayInterfac
 
             $responseData = $response->json();
 
-            $this->logInfo('Refund processed', [
+            $this->logInfo('EasyPaisa refund processed', [
+                'transaction_id' => $transactionId,
+                'amount' => $amount,
                 'request' => $requestData,
                 'response' => $responseData,
                 'status_code' => $response->status(),
             ]);
 
             if ($response->successful() && isset($responseData['pp_ResponseCode']) && $responseData['pp_ResponseCode'] === '000') {
-                return new PaymentResponse(
-                    success: true,
-                    transaction_id: $responseData['pp_RefundTxnRefNo'] ?? $responseData['refundTransactionId'],
-                    message: 'Refund processed successfully',
-                    data: $responseData
-                );
+                Log::info('EasyPaisa refund processed successfully', [
+                    'transaction_id' => $transactionId,
+                    'amount' => $amount,
+                    'refund_transaction_id' => $responseData['pp_RefundTxnRefNo'] ?? $responseData['refundTransactionId']
+                ]);
+                return true;
             }
 
-            return new PaymentResponse(
-                success: false,
-                message: $responseData['pp_ResponseMessage'] ?? 'Refund failed',
-                code: $responseData['pp_ResponseCode'] ?? $response->status(),
-                data: $responseData
-            );
+            Log::error('EasyPaisa refund failed', [
+                'transaction_id' => $transactionId,
+                'amount' => $amount,
+                'error' => $responseData['pp_ResponseMessage'] ?? 'Refund failed',
+                'response_code' => $responseData['pp_ResponseCode'] ?? $response->status(),
+                'response' => $responseData
+            ]);
+            return false;
 
         } catch (\Exception $e) {
-            $this->logError('Refund processing failed', [
-                'error' => $e->getMessage(),
-                'data' => $data,
+            $this->logError('EasyPaisa refund processing failed', [
+                'transaction_id' => $transactionId,
+                'amount' => $amount,
+                'error' => $e->getMessage()
             ]);
-
-            return new PaymentResponse(
-                success: false,
-                message: $e->getMessage(),
-                code: 500
-            );
+            return false;
         }
+    }
+
+    /**
+     * Check if gateway supports refunds
+     */
+    public function supportsRefund(): bool
+    {
+        return true;
     }
 
     /**

@@ -2,9 +2,9 @@
 
 namespace Mdiqbal\LaravelPayments\Gateways\Midtrans;
 
-use Mdiqbal\LaravelPayments\DTOs\PaymentRequest;
-use Mdiqbal\LaravelPayments\DTOs\PaymentResponse;
-use Mdiqbal\LaravelPayments\Gateways\AbstractGateway;
+use Mdiqbal\LaravelPayments\DTO\PaymentRequest;
+use Mdiqbal\LaravelPayments\DTO\PaymentResponse;
+use Mdiqbal\LaravelPayments\Core\AbstractGateway;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -16,6 +16,14 @@ class MidtransGateway extends AbstractGateway
      * Gateway name
      */
     protected string $name = 'midtrans';
+
+    /**
+     * Get gateway name
+     */
+    public function gatewayName(): string
+    {
+        return $this->name;
+    }
 
     /**
      * Supported currencies by Midtrans
@@ -34,8 +42,8 @@ class MidtransGateway extends AbstractGateway
     /**
      * API configuration
      */
-    private string $serverKey;
-    private string $clientKey;
+    private ?string $serverKey;
+    private ?string $clientKey;
     private bool $testMode;
     private array $enabledPayments;
 
@@ -43,10 +51,10 @@ class MidtransGateway extends AbstractGateway
     {
         parent::__construct($config);
 
-        $this->serverKey = $this->config->get('server_key');
-        $this->clientKey = $this->config->get('client_key');
-        $this->testMode = $this->config->get('test_mode', true);
-        $this->enabledPayments = $this->config->get('enabled_payments', []);
+        $this->serverKey = $this->config['server_key'] ?? null;
+        $this->clientKey = $this->config['client_key'] ?? null;
+        $this->testMode = $this->config['test_mode'] ?? true;
+        $this->enabledPayments = $this->config['enabled_payments'] ?? [];
     }
 
     /**
@@ -198,26 +206,27 @@ class MidtransGateway extends AbstractGateway
 
     /**
      * Process refund through Midtrans
+     * Note: Implementation limitations - Midtrans refund API requires additional parameters
+     * and may not support direct refund by transaction ID and amount alone.
      */
-    public function refund(array $data): PaymentResponse
+    public function refund(string $transactionId, float $amount): bool
     {
         try {
-            $transactionId = $data['transaction_id'] ?? null;
-            $refundAmount = $data['amount'] ?? null;
-            $refundReason = $data['reason'] ?? 'Customer requested refund';
-
             if (!$transactionId) {
-                return new PaymentResponse(
-                    success: false,
-                    message: 'Transaction ID is required for refund'
-                );
+                Log::error('Midtrans refund failed: Transaction ID is required');
+                return false;
+            }
+
+            if ($amount <= 0) {
+                Log::error('Midtrans refund failed: Refund amount must be greater than 0');
+                return false;
             }
 
             // Prepare refund data
             $refundData = [
                 'refund_key' => Str::random(32),
-                'amount' => $refundAmount,
-                'reason' => $refundReason,
+                'amount' => $amount,
+                'reason' => 'Customer requested refund',
             ];
 
             $response = Http::withHeaders([
@@ -230,44 +239,47 @@ class MidtransGateway extends AbstractGateway
 
             Log::info('Midtrans refund request', [
                 'transaction_id' => $transactionId,
+                'amount' => $amount,
                 'request' => $refundData,
                 'response' => $responseData
             ]);
 
+            // Return true if refund was successful
             if ($response->successful() && ($responseData['status_code'] ?? null) === 200) {
-                return new PaymentResponse(
-                    success: true,
-                    transactionId: $responseData['transaction_id'] ?? $transactionId,
-                    message: 'Refund processed successfully',
-                    data: [
-                        'refund_status' => 'processed',
-                        'refund_amount' => $responseData['refund_amount'] ?? $refundAmount,
-                        'refund_key' => $responseData['refund_key'] ?? $refundData['refund_key'],
-                        'refund_transaction_id' => $responseData['refund_transaction_id'] ?? null,
-                    ]
-                );
+                Log::info('Midtrans refund processed successfully', [
+                    'transaction_id' => $transactionId,
+                    'amount' => $amount
+                ]);
+                return true;
             }
 
+            // Log error and return false
             $errorMessage = $responseData['error_messages'][0] ?? 'Refund failed';
-
-            return new PaymentResponse(
-                success: false,
-                message: $errorMessage,
-                errorCode: $responseData['status_code'] ?? 'REFUND_ERROR',
-                data: $responseData
-            );
+            Log::error('Midtrans refund failed', [
+                'transaction_id' => $transactionId,
+                'amount' => $amount,
+                'error' => $errorMessage,
+                'response' => $responseData
+            ]);
+            return false;
 
         } catch (\Exception $e) {
             Log::error('Midtrans refund error', [
+                'transaction_id' => $transactionId,
+                'amount' => $amount,
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString()
             ]);
-
-            return new PaymentResponse(
-                success: false,
-                message: 'Refund processing failed: ' . $e->getMessage()
-            );
+            return false;
         }
+    }
+
+    /**
+     * Check if gateway supports refunds
+     */
+    public function supportsRefund(): bool
+    {
+        return true;
     }
 
     /**

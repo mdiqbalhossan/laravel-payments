@@ -209,9 +209,9 @@ class PaypalGateway extends AbstractGateway
         return $baseUrl . '/' . ltrim($path, '/');
     }
 
-    protected function createHttpClient(): Client
+    protected function createHttpClient(array $options = []): Client
     {
-        return new Client([
+        $defaultOptions = [
             'base_uri' => $this->getEndpoint(''),
             'timeout' => 30,
             'headers' => [
@@ -220,7 +220,9 @@ class PaypalGateway extends AbstractGateway
                 'Accept-Language' => 'en_US',
                 'User-Agent' => 'Laravel-Payments/1.0.0',
             ]
-        ]);
+        ];
+
+        return new Client(array_merge($defaultOptions, $options));
     }
 
     /**
@@ -401,7 +403,7 @@ class PaypalGateway extends AbstractGateway
     /**
      * Make authenticated HTTP request
      */
-    private function makeRequest(string $method, string $url, array $options = []): array
+    protected function makeRequest(string $method, string $url, array $options = []): array
     {
         $client = $this->createHttpClient();
 

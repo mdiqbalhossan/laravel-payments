@@ -2,9 +2,9 @@
 
 namespace Mdiqbal\LaravelPayments\Gateways\Iyzico;
 
-use Mdiqbal\LaravelPayments\DTOs\PaymentRequest;
-use Mdiqbal\LaravelPayments\DTOs\PaymentResponse;
-use Mdiqbal\LaravelPayments\Gateways\AbstractGateway;
+use Mdiqbal\LaravelPayments\DTO\PaymentRequest;
+use Mdiqbal\LaravelPayments\DTO\PaymentResponse;
+use Mdiqbal\LaravelPayments\Core\AbstractGateway;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -15,6 +15,14 @@ class IyzicoGateway extends AbstractGateway
      * Gateway name
      */
     protected string $name = 'iyzico';
+
+    /**
+     * Get gateway name
+     */
+    public function gatewayName(): string
+    {
+        return $this->name;
+    }
 
     /**
      * Supported currencies by Iyzico
@@ -31,8 +39,8 @@ class IyzicoGateway extends AbstractGateway
     /**
      * API configuration
      */
-    private string $apiKey;
-    private string $secretKey;
+    private ?string $apiKey;
+    private ?string $secretKey;
     private string $baseUrl;
     private bool $testMode;
 
@@ -40,9 +48,9 @@ class IyzicoGateway extends AbstractGateway
     {
         parent::__construct($config);
 
-        $this->apiKey = $this->config->get('api_key');
-        $this->secretKey = $this->config->get('secret_key');
-        $this->testMode = $this->config->get('test_mode', true);
+        $this->apiKey = $this->config['api_key'] ?? null;
+        $this->secretKey = $this->config['secret_key'] ?? null;
+        $this->testMode = $this->config['test_mode'] ?? true;
 
         $this->baseUrl = $this->testMode
             ? 'https://sandbox-api.iyzipay.com'
@@ -141,7 +149,7 @@ class IyzicoGateway extends AbstractGateway
                 'currency' => $data['currency'] ?? 'TRY',
                 'basketId' => $data['basket_id'] ?? 'B' . uniqid(),
                 'paymentGroup' => $data['payment_group'] ?? 'PRODUCT',
-                'callbackUrl' => $data['callback_url'] ?? $this->config->get('callback_url'),
+                'callbackUrl' => $data['callback_url'] ?? $this->config['callback_url'],
                 'enabledInstallments' => $data['enabled_installments'] ?? [2, 3, 6, 9],
                 'buyer' => [
                     'id' => $data['buyer']['id'] ?? 'BY' . uniqid(),
@@ -320,31 +328,35 @@ class IyzicoGateway extends AbstractGateway
 
     /**
      * Process refund through Iyzico
+     * Note: Implementation limitations - Iyzico requires payment transaction ID rather than
+     * order transaction ID. The transactionId parameter should be the payment transaction ID.
      */
-    public function refund(array $data): PaymentResponse
+    public function refund(string $transactionId, float $amount): bool
     {
         try {
-            $paymentId = $data['payment_id'] ?? null;
-            $refundReason = $data['reason'] ?? 'Customer requested refund';
-            $currency = $data['currency'] ?? 'TRY';
-
-            if (!$paymentId) {
-                return new PaymentResponse(
-                    success: false,
-                    message: 'Payment ID is required for refund'
-                );
+            if (!$transactionId) {
+                Log::error('Iyzico refund failed: Payment ID is required');
+                return false;
             }
+
+            if ($amount <= 0) {
+                Log::error('Iyzico refund failed: Refund amount must be greater than 0');
+                return false;
+            }
+
+            $paymentId = $transactionId; // Transaction ID is the payment transaction ID for Iyzico
 
             // Prepare refund data
             $refundData = [
-                'locale' => $data['locale'] ?? 'tr',
-                'conversationId' => $data['conversation_id'] ?? 'conv_' . uniqid(),
+                'locale' => 'tr',
+                'conversationId' => 'conv_' . uniqid(),
                 'paymentTransactionId' => $paymentId,
-                'price' => $data['amount'] ?? null, // For partial refund
-                'currency' => $currency,
+                'price' => $amount, // For partial refund
+                'currency' => 'TRY',
             ];
 
-            $endpoint = isset($refundData['price']) ? '/payment/iyzipos/refund/changepaymentamount' : '/payment/iyzipos/refund';
+            // Use change payment amount endpoint for partial/full refunds
+            $endpoint = '/payment/iyzipos/refund/changepaymentamount';
 
             $response = Http::withHeaders([
                 'Authorization' => $this->generateAuthorizationHeader(),
@@ -355,47 +367,47 @@ class IyzicoGateway extends AbstractGateway
             $responseData = $response->json();
 
             Log::info('Iyzico refund request', [
+                'payment_id' => $paymentId,
+                'amount' => $amount,
                 'request' => $refundData,
                 'response' => $responseData
             ]);
 
             if ($response->successful() && isset($responseData['status']) && $responseData['status'] === 'success') {
-                $refundData = $responseData;
-
-                return new PaymentResponse(
-                    success: true,
-                    transactionId: $refundData['paymentId'] ?? null,
-                    message: 'Refund processed successfully',
-                    data: [
-                        'payment_id' => $refundData['paymentId'] ?? null,
-                        'price' => $refundData['price'] ?? 0,
-                        'currency' => $refundData['currency'] ?? 'TRY',
-                        'refund_status' => 'processed',
-                        'refund_transaction_id' => $refundData['refundTransactionId'] ?? null,
-                    ]
-                );
+                Log::info('Iyzico refund processed successfully', [
+                    'payment_id' => $paymentId,
+                    'amount' => $amount,
+                    'refund_transaction_id' => $responseData['refundTransactionId'] ?? null
+                ]);
+                return true;
             }
 
             $errorMessage = $responseData['errorMessage'] ?? 'Refund failed';
-
-            return new PaymentResponse(
-                success: false,
-                message: $errorMessage,
-                errorCode: $responseData['errorCode'] ?? 'REFUND_ERROR',
-                data: $responseData
-            );
+            Log::error('Iyzico refund failed', [
+                'payment_id' => $paymentId,
+                'amount' => $amount,
+                'error' => $errorMessage,
+                'response' => $responseData
+            ]);
+            return false;
 
         } catch (\Exception $e) {
             Log::error('Iyzico refund error', [
+                'transaction_id' => $transactionId,
+                'amount' => $amount,
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString()
             ]);
-
-            return new PaymentResponse(
-                success: false,
-                message: 'Refund processing failed: ' . $e->getMessage()
-            );
+            return false;
         }
+    }
+
+    /**
+     * Check if gateway supports refunds
+     */
+    public function supportsRefund(): bool
+    {
+        return true;
     }
 
     /**

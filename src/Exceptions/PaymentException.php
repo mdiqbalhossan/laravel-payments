@@ -10,7 +10,7 @@ class PaymentException extends Exception
     protected ?string $transactionId = null;
     protected array $context = [];
 
-    public function __construct(string $message = "", int $code = 0, ?Throwable $previous = null, ?string $gateway = null, ?string $transactionId = null, array $context = [])
+    public function __construct(string $message = "", int $code = 0, ?\Throwable $previous = null, ?string $gateway = null, ?string $transactionId = null, array $context = [])
     {
         parent::__construct($message, $code, $previous);
         $this->gateway = $gateway;

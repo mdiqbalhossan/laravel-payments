@@ -96,7 +96,7 @@ class SkrillGateway extends AbstractGateway
         }
     }
 
-    public function verify(string $sessionId): PaymentResponse
+    public function verifySession(string $sessionId): PaymentResponse
     {
         try {
             if (empty($sessionId)) {
@@ -147,34 +147,43 @@ class SkrillGateway extends AbstractGateway
         }
     }
 
-    public function refund(array $data): PaymentResponse
+    public function refund(string $transactionId, float $amount): bool
     {
         try {
-            $sessionId = $data['session_id'];
-            $refundAmount = $data['amount'] ?? null;
-            $refundReason = $data['reason'] ?? 'Refund requested';
+            Log::info('Processing Skrill refund', [
+                'transaction_id' => $transactionId,
+                'amount' => $amount
+            ]);
 
-            if (empty($sessionId)) {
-                return $this->createErrorResponse('Session ID is required');
+            if (empty($transactionId)) {
+                Log::error('Skrill refund failed: Transaction ID is required');
+                return false;
             }
 
             // Get original payment details first
-            $paymentStatus = $this->getPaymentStatus($sessionId);
+            $paymentStatus = $this->getPaymentStatus($transactionId);
 
             if (!$paymentStatus) {
-                return $this->createErrorResponse('Original payment not found');
+                Log::error('Skrill refund failed: Original payment not found', [
+                    'transaction_id' => $transactionId
+                ]);
+                return false;
             }
 
             // Check if payment is eligible for refund
             if (!in_array($paymentStatus['status'], ['processed', 'success'])) {
-                return $this->createErrorResponse('Payment is not eligible for refund');
+                Log::error('Skrill refund failed: Payment not eligible for refund', [
+                    'transaction_id' => $transactionId,
+                    'status' => $paymentStatus['status']
+                ]);
+                return false;
             }
 
             // Prepare refund request
             $refundData = [
-                'session_id' => $sessionId,
-                'amount' => $refundAmount,
-                'reason' => $refundReason,
+                'session_id' => $transactionId,
+                'amount' => $amount,
+                'reason' => 'Refund requested',
                 'merchant_account_id' => $this->config->getMerchantId(),
             ];
 
@@ -185,34 +194,39 @@ class SkrillGateway extends AbstractGateway
             ])->post($this->getEndpoint('psp/v2/refunds'), $refundData);
 
             if (!$response->successful()) {
-                return $this->createErrorResponse('Refund request failed');
+                Log::error('Skrill refund request failed', [
+                    'transaction_id' => $transactionId,
+                    'amount' => $amount,
+                    'status' => $response->status(),
+                    'response' => $response->body()
+                ]);
+                return false;
             }
 
             $result = $response->json();
 
             if (isset($result['id'])) {
-                return PaymentResponse::success([
-                    'refund_id' => $result['id'],
-                    'session_id' => $sessionId,
-                    'amount_refunded' => (float) ($result['amount'] ?? $refundAmount),
-                    'currency' => $result['currency'] ?? $paymentStatus['currency'],
-                    'reason' => $refundReason,
-                    'status' => 'refunded',
-                    'merchant_info' => [
-                        'skrill_refund_id' => $result['id'],
-                        'session_id' => $sessionId,
-                    ]
+                Log::info('Skrill refund processed successfully', [
+                    'transaction_id' => $transactionId,
+                    'amount' => $amount,
+                    'refund_id' => $result['id']
                 ]);
+                return true;
             }
 
-            return $this->createErrorResponse('Refund processing failed: ' . ($result['error']['message'] ?? 'Unknown error'));
-        } catch (Exception $e) {
-            $this->logError('Refund processing failed', [
-                'error' => $e->getMessage(),
-                'data' => $data
+            Log::error('Skrill refund processing failed', [
+                'transaction_id' => $transactionId,
+                'amount' => $amount,
+                'error' => $result['error']['message'] ?? 'Unknown error'
             ]);
-
-            return $this->createErrorResponse($e->getMessage());
+            return false;
+        } catch (Exception $e) {
+            Log::error('Skrill refund processing exception', [
+                'transaction_id' => $transactionId,
+                'amount' => $amount,
+                'error' => $e->getMessage()
+            ]);
+            return false;
         }
     }
 
@@ -223,7 +237,7 @@ class SkrillGateway extends AbstractGateway
 
     public function getTransactionStatus(string $sessionId): PaymentResponse
     {
-        return $this->verify($sessionId);
+        return $this->verifySession($sessionId);
     }
 
     public function searchTransactions(array $filters = []): PaymentResponse

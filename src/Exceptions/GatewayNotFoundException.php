@@ -6,7 +6,7 @@ use Exception;
 
 class GatewayNotFoundException extends PaymentException
 {
-    public function __construct(string $gateway, int $code = 404, ?Throwable $previous = null)
+    public function __construct(string $gateway, int $code = 404, ?\Throwable $previous = null)
     {
         parent::__construct(
             message: "Payment gateway '{$gateway}' not found or not configured",
