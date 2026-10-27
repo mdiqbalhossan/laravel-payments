@@ -5,11 +5,65 @@
 **Method**
 1. Read every gateway class, the core classes, the DTOs and the webhook controller.
 2. Ran an automated suite, `tests/QA/GatewayQaTest.php` (21 gateways × 8 checks = 168 tests). It makes no real network calls: Laravel `Http` is faked, and SDK/Guzzle traffic goes to a dead proxy.
-   Run it with: `vendor/bin/phpunit -c phpunit.qa.xml`
+   After the fixes, `tests/QA/GatewayFlowTest.php` adds happy-path tests for every gateway.
+   Run everything with: `vendor/bin/phpunit`
 
-**Verdict:** none of the 21 gateways is production-ready as shipped. The closest are **Paystack** and **Razorpay**, then **Stripe**, **PayPal** and **Mercado Pago**. All of them still need the cross-cutting fixes in section 1.
+**Verdict (v2.1.2 as shipped):** none of the 21 gateways was production-ready.
+**After the fixes on this branch:** all 21 pass the QA and flow suites; do a sandbox run per gateway before release (see below).
+
+## Status after fixes
+
+All findings below were fixed on this branch. Most gateways were rewritten against the
+providers' current REST APIs, without mock fallbacks. Full suite (`vendor/bin/phpunit`):
+**220 tests, 0 failures** (5 skipped: Stripe/Razorpay use their SDKs, and senangPay, PayFast and Easypaisa
+`pay()` only build a signed URL/form, so no HTTP request to inspect).
+
+| Gateway | PSR-4 | Resolve | Live mode | Sends config creds | No-creds ≠ success | Forged callback rejected | Refund honest | Webhook route | Happy-path flow test |
+|---|---|---|---|---|---|---|---|---|---|
+| paypal | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | ✔ pay → capture → refund |
+| stripe | PASS | PASS | PASS | SKIP | PASS | PASS | PASS | PASS | ✔ signed webhook |
+| razorpay | PASS | PASS | PASS | SKIP | PASS | PASS | PASS | PASS | ✔ signed webhook |
+| paystack | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | ✔ pay/verify/webhook |
+| paytm | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | ✔ checksum + pay/verify |
+| flutterwave | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | ✔ pay/verify/webhook |
+| sslcommerz | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | ✔ pay/validate/IPN hash |
+| mollie | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | ✔ pay/verify |
+| senangpay | PASS | PASS | PASS | SKIP | PASS | PASS | PASS | PASS | ✔ hashes |
+| bkash | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | ✔ token/create/execute |
+| mercadopago | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | ✔ signed webhook |
+| cashfree | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | ✔ order/verify/webhook |
+| payfast | PASS | PASS | PASS | SKIP | PASS | PASS | PASS | PASS | ✔ signature + ITN |
+| skrill | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | ✔ md5sig |
+| phonepe | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | ✔ X-VERIFY/status/callback |
+| telr | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | ✔ create/check |
+| iyzico | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | ✔ IYZWSv2/retrieve |
+| pesapal | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | ✔ token/submit/status |
+| midtrans | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | ✔ snap/notification |
+| myfatoorah | PASS | PASS | PASS | PASS | PASS | PASS | PASS | PASS | ✔ send/status |
+| easypaisa | PASS | PASS | PASS | SKIP | PASS | PASS | PASS | PASS | ✔ hash/inquiry |
+
+### What the tests do and don't prove
+
+The tests run against faked provider responses. They prove that the package works correctly
+as Laravel code: config is read, requests are signed, forged callbacks are rejected, nothing
+crashes, and refunds are reported honestly. They **cannot** prove that a provider accepts every
+request field. Run each gateway you enable once in its sandbox before going live. Confidence
+in the request formats:
+
+- **High** (stable, well-documented APIs and signature schemes): Stripe, PayPal, Razorpay,
+  Paystack, Flutterwave, Mollie, Midtrans, SSLCommerz, bKash, Cashfree, Mercado Pago, PayFast,
+  Paytm (port of the official PaytmChecksum).
+- **Check carefully in sandbox**: PhonePe (implements the salt-key `/pg/v1` API; PhonePe is
+  moving merchants to its OAuth v2 API), iyzico (buyer/basket fields), MyFatoorah (webhook
+  signature format), Pesapal (refund), Telr, Skrill (MQI response parsing), senangPay (needs
+  hash type SHA256), Easypaisa (hosted-checkout hash and inquiry endpoint).
+
+Not supported via API (`supportsRefund() === false`): senangPay, PayFast, Skrill, Telr, Easypaisa.
 
 ---
+
+## Original findings (before fixes)
+
 
 ## Result matrix
 

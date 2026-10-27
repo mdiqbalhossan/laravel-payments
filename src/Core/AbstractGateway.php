@@ -22,7 +22,7 @@ abstract class AbstractGateway implements PaymentGatewayInterface
     public function __construct(array $config = [])
     {
         $this->config = $config;
-        $this->mode = $config['mode'] ?? 'sandbox';
+        $this->mode = $this->normalizeMode($config['mode'] ?? 'sandbox');
         $this->client = $this->createHttpClient();
     }
 
@@ -80,7 +80,7 @@ abstract class AbstractGateway implements PaymentGatewayInterface
     public function setConfig(array $config): self
     {
         $this->config = array_merge($this->config, $config);
-        $this->mode = $this->config['mode'] ?? 'sandbox';
+        $this->mode = $this->normalizeMode($this->config['mode'] ?? 'sandbox');
 
         return $this;
     }
@@ -98,10 +98,21 @@ abstract class AbstractGateway implements PaymentGatewayInterface
      */
     public function setMode(string $mode): self
     {
-        $this->mode = $mode;
-        $this->config['mode'] = $mode;
+        $this->mode = $this->normalizeMode($mode);
+        $this->config['mode'] = $this->mode;
 
         return $this;
+    }
+
+    /**
+     * Accept common aliases (test/staging/production) for the two supported modes.
+     */
+    protected function normalizeMode(string $mode): string
+    {
+        return match (strtolower(trim($mode))) {
+            'live', 'production', 'prod' => 'live',
+            default => 'sandbox',
+        };
     }
 
     /**
