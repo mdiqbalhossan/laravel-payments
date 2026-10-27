@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.0/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+         cacheDirectory=".phpunit.cache">
+    <testsuites>
+        <testsuite name="QA">
+            <directory>tests/QA</directory>
+        </testsuite>
+    </testsuites>
+    <php>
+        <env name="APP_ENV" value="testing"/>
+        <env name="APP_KEY" value="base64:2fl+Ktvkfl+Fuz4Qp/A75G2RTiWVA/ZoKZvp6fiiM10="/>
+        <!-- Block real network: SDK / raw Guzzle calls fail fast instead of reaching providers -->
+        <env name="HTTPS_PROXY" value="http://127.0.0.1:9" force="true"/>
+        <env name="https_proxy" value="http://127.0.0.1:9" force="true"/>
+        <env name="HTTP_PROXY" value="http://127.0.0.1:9" force="true"/>
+        <env name="http_proxy" value="http://127.0.0.1:9" force="true"/>
+        <env name="NO_PROXY" value="" force="true"/>
+        <env name="no_proxy" value="" force="true"/>
+    </php>
+</phpunit>
