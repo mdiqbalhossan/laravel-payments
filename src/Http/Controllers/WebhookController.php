@@ -4,9 +4,12 @@ namespace Mdiqbal\LaravelPayments\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
-use Mdiqbal\LaravelPayments\Facades\Payment;
-use Mdiqbal\LaravelPayments\Exceptions\InvalidSignatureException;
+use Mdiqbal\LaravelPayments\Core\AbstractGateway;
 use Mdiqbal\LaravelPayments\DTO\WebhookPayload;
+use Mdiqbal\LaravelPayments\Events\WebhookHandled;
+use Mdiqbal\LaravelPayments\Exceptions\InvalidSignatureException;
+use Mdiqbal\LaravelPayments\Exceptions\PaymentException;
+use Mdiqbal\LaravelPayments\Facades\Payment;
 
 class WebhookController extends Controller
 {
@@ -15,46 +18,32 @@ class WebhookController extends Controller
      */
     public function handle(Request $request, string $gateway)
     {
+        if (!Payment::hasGateway($gateway)) {
+            return response()->json([
+                'error' => 'Gateway not found',
+                'message' => "Payment gateway '{$gateway}' is not configured"
+            ], 404);
+        }
+
         try {
-            // Validate gateway exists
-            if (!Payment::hasGateway($gateway)) {
-                return response()->json([
-                    'error' => 'Gateway not found',
-                    'message' => "Payment gateway '{$gateway}' is not configured"
-                ], 404);
-            }
-
-            // Get the gateway instance
             $gatewayInstance = Payment::gateway($gateway);
+            $payload = WebhookPayload::fromHttpRequest($gateway, $request);
 
-            // Create webhook payload
-            $payload = WebhookPayload::fromRequest(
-                gateway: $gateway,
-                payload: $request->all(),
-                headers: $request->headers->all()
-            );
+            // Gateways verify their own signature header against the raw body
+            $response = $gatewayInstance instanceof AbstractGateway
+                ? $gatewayInstance->handleWebhook($payload->all(), $payload->rawBody, $payload->headers)
+                : $gatewayInstance->verify($payload->all());
 
-            // Verify signature if gateway supports it
-            if ($payload->hasSignature() && method_exists($gatewayInstance, 'validateWebhookSignature')) {
-                if (!$gatewayInstance->validateWebhookSignature($payload->all(), $payload->signature)) {
-                    throw new InvalidSignatureException("Invalid webhook signature for {$gateway}");
-                }
-            }
+            event(new WebhookHandled($gateway, $response, $payload->all()));
 
-            // Process the webhook
-            $response = $gatewayInstance->verify($payload->all());
-
-            // Return appropriate response
             return $response->success
                 ? response()->json(['status' => 'success'], 200)
-                : response()->json(['status' => 'failed'], 400);
+                : response()->json(['status' => 'failed', 'message' => $response->message], 400);
 
         } catch (InvalidSignatureException $e) {
-            // Log the error
-            logger()->error('Webhook signature verification failed', [
+            logger()->warning('Webhook signature verification failed', [
                 'gateway' => $gateway,
                 'error' => $e->getMessage(),
-                'payload' => $request->all()
             ]);
 
             return response()->json([
@@ -62,17 +51,26 @@ class WebhookController extends Controller
                 'message' => $e->getMessage()
             ], 401);
 
-        } catch (\Exception $e) {
-            // Log the error
+        } catch (PaymentException $e) {
+            logger()->warning('Webhook rejected', [
+                'gateway' => $gateway,
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'error' => 'Webhook rejected',
+                'message' => $e->getMessage()
+            ], 400);
+
+        } catch (\Throwable $e) {
             logger()->error('Webhook processing failed', [
                 'gateway' => $gateway,
                 'error' => $e->getMessage(),
-                'payload' => $request->all()
+                'exception' => $e,
             ]);
 
             return response()->json([
                 'error' => 'Processing failed',
-                'message' => $e->getMessage()
             ], 500);
         }
     }

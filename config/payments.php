@@ -35,6 +35,10 @@ return [
     */
 
     'webhook' => [
+        // Registers POST {prefix}/{gateway}. Each gateway verifies its own
+        // signature header against the raw body; listen for
+        // Mdiqbal\LaravelPayments\Events\WebhookHandled to update orders.
+        'enabled' => env('PAYMENT_WEBHOOK_ENABLED', true),
         'prefix' => 'payments/webhook',
         'middleware' => ['api'],
     ],
@@ -60,6 +64,7 @@ return [
                 'client_id' => env('PAYPAL_LIVE_CLIENT_ID'),
                 'client_secret' => env('PAYPAL_LIVE_CLIENT_SECRET'),
             ],
+            // The Webhook ID from the PayPal developer dashboard (used to verify webhooks)
             'webhook_secret' => env('PAYPAL_WEBHOOK_SECRET'),
         ],
 
@@ -73,6 +78,7 @@ return [
                 'secret_key' => env('STRIPE_LIVE_SECRET'),
                 'api_key' => env('STRIPE_LIVE_KEY'),
             ],
+            // whsec_... signing secret; required for the webhook route
             'webhook_secret' => env('STRIPE_WEBHOOK_SECRET'),
         ],
 
@@ -86,6 +92,8 @@ return [
                 'key_id' => env('RAZORPAY_LIVE_KEY_ID'),
                 'key_secret' => env('RAZORPAY_LIVE_KEY_SECRET'),
             ],
+            // Webhook secret set in the Razorpay dashboard; required for the webhook route
+            'webhook_secret' => env('RAZORPAY_WEBHOOK_SECRET'),
         ],
 
         'paystack' => [
@@ -122,6 +130,8 @@ return [
                 'public_key' => env('FLUTTERWAVE_LIVE_PUBLIC_KEY'),
                 'secret_key' => env('FLUTTERWAVE_LIVE_SECRET_KEY'),
             ],
+            // "Secret hash" from the dashboard; sent back as the verif-hash header
+            'secret_hash' => env('FLUTTERWAVE_SECRET_HASH'),
         ],
 
         'sslcommerz' => [
@@ -218,27 +228,31 @@ return [
             'mode' => env('SKRILL_MODE', 'sandbox'),
             'sandbox' => [
                 'merchant_email' => env('SKRILL_SANDBOX_MERCHANT_EMAIL'),
+                'secret_word' => env('SKRILL_SANDBOX_SECRET_WORD'),
                 'api_password' => env('SKRILL_SANDBOX_API_PASSWORD'),
             ],
             'live' => [
                 'merchant_email' => env('SKRILL_LIVE_MERCHANT_EMAIL'),
+                'secret_word' => env('SKRILL_LIVE_SECRET_WORD'),
                 'api_password' => env('SKRILL_LIVE_API_PASSWORD'),
             ],
         ],
 
         'phonepe' => [
             'mode' => env('PHONEPE_MODE', 'sandbox'),
+            // PG Standard Checkout (salt key / X-VERIFY). The old client_id /
+            // key_index / secret_key names are still read as fallbacks.
             'sandbox' => [
-                'client_id' => env('PHONEPE_SANDBOX_CLIENT_ID'),
+                'merchant_id' => env('PHONEPE_SANDBOX_MERCHANT_ID', env('PHONEPE_SANDBOX_CLIENT_ID')),
                 'merchant_user_id' => env('PHONEPE_SANDBOX_MERCHANT_USER_ID'),
-                'key_index' => env('PHONEPE_SANDBOX_KEY_INDEX'),
-                'secret_key' => env('PHONEPE_SANDBOX_SECRET_KEY'),
+                'salt_index' => env('PHONEPE_SANDBOX_SALT_INDEX', env('PHONEPE_SANDBOX_KEY_INDEX', 1)),
+                'salt_key' => env('PHONEPE_SANDBOX_SALT_KEY', env('PHONEPE_SANDBOX_SECRET_KEY')),
             ],
             'live' => [
-                'client_id' => env('PHONEPE_LIVE_CLIENT_ID'),
+                'merchant_id' => env('PHONEPE_LIVE_MERCHANT_ID', env('PHONEPE_LIVE_CLIENT_ID')),
                 'merchant_user_id' => env('PHONEPE_LIVE_MERCHANT_USER_ID'),
-                'key_index' => env('PHONEPE_LIVE_KEY_INDEX'),
-                'secret_key' => env('PHONEPE_LIVE_SECRET_KEY'),
+                'salt_index' => env('PHONEPE_LIVE_SALT_INDEX', env('PHONEPE_LIVE_KEY_INDEX', 1)),
+                'salt_key' => env('PHONEPE_LIVE_SALT_KEY', env('PHONEPE_LIVE_SECRET_KEY')),
             ],
         ],
 
@@ -300,6 +314,9 @@ return [
             'live' => [
                 'api_key' => env('MYFATOORAH_LIVE_API_KEY'),
             ],
+            // Live API host region: KW (default, also AE/BH/JO/OM), SA, QA or EG
+            'country' => env('MYFATOORAH_COUNTRY', 'KW'),
+            'webhook_secret' => env('MYFATOORAH_WEBHOOK_SECRET'),
         ],
 
         'easypaisa' => [
@@ -309,12 +326,14 @@ return [
                 'hash_key' => env('EASYPAISA_SANDBOX_HASH_KEY'),
                 'username' => env('EASYPAISA_SANDBOX_USERNAME'),
                 'password' => env('EASYPAISA_SANDBOX_PASSWORD'),
+                'account_num' => env('EASYPAISA_SANDBOX_ACCOUNT_NUM'),
             ],
             'live' => [
                 'store_id' => env('EASYPAISA_LIVE_STORE_ID'),
                 'hash_key' => env('EASYPAISA_LIVE_HASH_KEY'),
                 'username' => env('EASYPAISA_LIVE_USERNAME'),
                 'password' => env('EASYPAISA_LIVE_PASSWORD'),
+                'account_num' => env('EASYPAISA_LIVE_ACCOUNT_NUM'),
             ],
         ],
     ],

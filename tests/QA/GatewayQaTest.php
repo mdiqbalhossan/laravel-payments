@@ -42,7 +42,7 @@ class GatewayQaTest extends TestCase
                 ['status' => 'successful', 'tx_ref' => 'ORD1', 'transaction_id' => '123456']],
             'sslcommerz' => ['BDT', ['store_name' => 'qa', 'store_id' => 'qa_store', 'store_password' => 'QA_SECRET'],
                 ['tran_id' => 'ORD1', 'val_id' => 'forged', 'status' => 'VALID', 'amount' => '100.00', 'currency' => 'BDT']],
-            'mollie' => ['EUR', ['api_key' => 'test_QAQAQAQAQAQAQAQAQAQAQAQAQAQAQA'],
+            'mollie' => ['EUR', ['api_key' => 'test_QA_SECRET_QAQAQAQAQAQAQAQAQAQA'],
                 ['id' => 'tr_forged']],
             'senangpay' => ['MYR', ['merchant_id' => 'QA_MID', 'secret_key' => 'QA_SECRET'],
                 ['status_id' => '1', 'order_id' => 'ORD1', 'transaction_id' => 'T1', 'msg' => 'Payment_was_successful', 'hash' => 'forged']],
@@ -114,10 +114,10 @@ class GatewayQaTest extends TestCase
         return new PaymentRequest(
             amount: 100.00,
             currency: $currency,
-            description: 'QA order',
-            orderId: 'QA_ORDER_1',
+            description: 'Test order',
+            orderId: 'ORDER_1001',
             email: 'buyer@example.com',
-            customer: ['name' => 'QA Buyer', 'email' => 'buyer@example.com', 'phone' => '01712345678'],
+            customer: ['name' => 'Test Buyer', 'email' => 'buyer@example.com', 'phone' => '01712345678'],
             returnUrl: 'https://shop.test/return',
             cancelUrl: 'https://shop.test/cancel',
             notifyUrl: 'https://shop.test/webhook',
@@ -184,8 +184,25 @@ class GatewayQaTest extends TestCase
 
         $seen = $recorded->contains(function ($pair) {
             $req = $pair[0];
+            $decodedBody = json_decode($req->body(), true) ?? [];
+            parse_str($req->body(), $formBody);
+            $decodedBody = is_array($decodedBody) ? $decodedBody + $formBody : $formBody;
             $haystack = json_encode($req->headers()) . $req->body() . $req->url();
-            return str_contains($haystack, 'QA') || str_contains($haystack, base64_encode('SB-Mid-server-QA_SECRET:'));
+
+            // Credentials are often base64-encoded (Basic auth, IYZWSv2, PhonePe request body)
+            $values = array_merge(...array_values($req->headers()));
+            array_walk_recursive($decodedBody, function ($v) use (&$values) {
+                $values[] = (string) $v;
+            });
+            foreach ($values as $value) {
+                $haystack .= $value;
+                $value = preg_replace('/^(Basic|IYZWSv2)\s+/', '', (string) $value);
+                if (($decoded = base64_decode($value, true)) !== false) {
+                    $haystack .= $decoded;
+                }
+            }
+
+            return stripos($haystack, 'QA_') !== false || stripos($haystack, 'qa@example.com') !== false || str_contains($haystack, '-QA') || str_contains($haystack, base64_encode('SB-Mid-server-QA_SECRET:'));
         });
 
         $this->assertTrue($seen, 'Outgoing request does not carry the credentials from config/payments.php (sandbox block)');
@@ -225,7 +242,7 @@ class GatewayQaTest extends TestCase
         Http::fake(fn () => Http::response(['message' => 'refund rejected'], 400));
 
         $gateway = Payment::gateway($name);
-        $result = $this->attempt(fn () => $gateway->refund('QA_TXN_1', 10.00));
+        $result = $this->attempt(fn () => $gateway->refund('TXN_1001', 10.00));
 
         if (! $gateway->supportsRefund()) {
             $this->assertInstanceOf(PaymentException::class, $result, 'Unsupported refund should throw PaymentException');

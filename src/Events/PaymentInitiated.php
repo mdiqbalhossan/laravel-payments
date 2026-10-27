@@ -26,7 +26,7 @@ class PaymentInitiated
     /**
      * Get the order ID
      */
-    public function getOrderId(): string
+    public function getOrderId(): ?string
     {
         return $this->request->orderId;
     }
@@ -50,8 +50,8 @@ class PaymentInitiated
     /**
      * Get the customer email
      */
-    public function getCustomerEmail(): string
+    public function getCustomerEmail(): ?string
     {
-        return $this->request->customerEmail;
+        return $this->request->getEmail();
     }
 }

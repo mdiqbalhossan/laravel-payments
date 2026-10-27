@@ -5,9 +5,10 @@ namespace Mdiqbal\LaravelPayments\Gateways\Paypal;
 use Mdiqbal\LaravelPayments\Core\AbstractGateway;
 use Mdiqbal\LaravelPayments\DTO\PaymentRequest;
 use Mdiqbal\LaravelPayments\DTO\PaymentResponse;
+use Mdiqbal\LaravelPayments\Exceptions\InvalidSignatureException;
 use Mdiqbal\LaravelPayments\Exceptions\PaymentException;
 use GuzzleHttp\Client;
-use GuzzleHttp\Exception\RequestException;
+use Illuminate\Support\Facades\Http;
 
 class PaypalGateway extends AbstractGateway
 {
@@ -60,110 +61,116 @@ class PaypalGateway extends AbstractGateway
         }
     }
 
+    /**
+     * Verify (and capture) a PayPal order after the buyer returns.
+     *
+     * Pass the order id as 'token' (PayPal appends ?token=ORDER_ID to the
+     * return URL), 'order_id' or 'id'. An APPROVED order is captured here; only
+     * a COMPLETED capture counts as success. The payload itself is never trusted.
+     */
     public function verify(array $payload): PaymentResponse
     {
+        $orderId = $payload['token'] ?? $payload['order_id'] ?? $payload['orderID'] ?? $payload['id'] ?? null;
+
+        if (!$orderId) {
+            throw new PaymentException('PayPal order id (token) not found in payload');
+        }
+
         try {
-            // PayPal webhook events include resource type and event type
-            $eventType = $payload['event_type'] ?? '';
-            $resource = $payload['resource'] ?? [];
-            $resourceType = $payload['resource_type'] ?? '';
+            $order = $this->getOrder($orderId);
 
-            // Verify webhook signature
-            if (!$this->verifyWebhookSignature($payload)) {
-                throw new PaymentException('Invalid PayPal webhook signature');
+            if (($order['status'] ?? null) === 'APPROVED') {
+                $order = $this->captureOrder($orderId);
             }
 
-            // Handle different event types
-            switch ($eventType) {
-                case 'PAYMENT.AUTHORIZATION.CREATED':
-                case 'PAYMENT.SALE.COMPLETED':
-                case 'PAYMENT.CAPTURE.COMPLETED':
-                case 'CHECKOUT.ORDER.APPROVED':
-                    $status = 'completed';
-                    $success = true;
-                    break;
-
-                case 'PAYMENT.SALE.DENIED':
-                case 'PAYMENT.CAPTURE.DENIED':
-                case 'CHECKOUT.ORDER.CANCELLED':
-                    $status = 'failed';
-                    $success = false;
-                    break;
-
-                case 'CHECKOUT.ORDER.CREATED':
-                    $status = 'pending';
-                    $success = false;
-                    break;
-
-                default:
-                    $status = 'unknown';
-                    $success = false;
-            }
-
-            // Get transaction details
-            $transactionId = $resource['id'] ?? $resource['sale_id'] ?? null;
-            $orderId = $resource['id'] ?? $resource['order_id'] ?? null;
-            $amount = $resource['amount']['total'] ?? 0;
-            $currency = $resource['amount']['currency'] ?? 'USD';
-
-            $this->log('info', 'PayPal webhook verified', [
-                'event_type' => $eventType,
-                'transaction_id' => $transactionId,
-                'order_id' => $orderId,
-                'status' => $status
-            ]);
-
-            return new PaymentResponse(
-                success: $success,
-                transactionId: $transactionId,
-                status: $status,
-                data: [
-                    'order_id' => $orderId,
-                    'amount' => $amount,
-                    'currency' => $currency,
-                    'event_type' => $eventType,
-                    'resource_type' => $resourceType,
-                    'webhook_data' => $payload
-                ]
-            );
-
+            return $this->orderToResponse($order, $orderId);
+        } catch (PaymentException $e) {
+            throw $e;
         } catch (\Exception $e) {
-            $this->log('error', 'PayPal webhook verification failed', [
-                'error' => $e->getMessage()
-            ]);
-            throw new PaymentException('PayPal webhook verification failed: ' . $e->getMessage());
+            throw new PaymentException('PayPal verification failed: ' . $e->getMessage(), 0, $e);
         }
     }
 
+    /**
+     * Handle a PayPal webhook. The event is verified with PayPal's
+     * verify-webhook-signature API using the configured webhook id.
+     */
+    public function handleWebhook(array $payload, string $rawBody, array $headers): PaymentResponse
+    {
+        $webhookId = $this->getModeConfig('webhook_id') ?? $this->getModeConfig('webhook_secret');
+        if (!$webhookId) {
+            throw PaymentException::configuration('paypal', 'webhook_id (PAYPAL_WEBHOOK_SECRET) is required to accept PayPal webhooks');
+        }
+
+        if (!$this->verifyWebhookSignature($rawBody, $headers, $webhookId)) {
+            throw new InvalidSignatureException('Invalid PayPal webhook signature', gateway: 'paypal');
+        }
+
+        return $this->parseWebhookEvent($payload);
+    }
+
+    /**
+     * Map a verified PayPal webhook event to a PaymentResponse.
+     */
+    protected function parseWebhookEvent(array $payload): PaymentResponse
+    {
+        $eventType = $payload['event_type'] ?? '';
+        $resource = $payload['resource'] ?? [];
+
+        [$status, $success] = match ($eventType) {
+            'PAYMENT.CAPTURE.COMPLETED', 'PAYMENT.SALE.COMPLETED' => ['completed', true],
+            'PAYMENT.CAPTURE.DENIED', 'PAYMENT.SALE.DENIED', 'CHECKOUT.ORDER.VOIDED' => ['failed', false],
+            'PAYMENT.CAPTURE.PENDING', 'CHECKOUT.ORDER.APPROVED', 'CHECKOUT.ORDER.CREATED' => ['pending', false],
+            'PAYMENT.CAPTURE.REFUNDED', 'PAYMENT.CAPTURE.REVERSED' => ['refunded', false],
+            default => ['unknown', false],
+        };
+
+        $amount = $resource['amount']['value'] ?? $resource['amount']['total'] ?? null;
+        $currency = $resource['amount']['currency_code'] ?? $resource['amount']['currency'] ?? null;
+
+        return new PaymentResponse(
+            success: $success,
+            transactionId: $resource['id'] ?? null,
+            status: $status,
+            data: [
+                'order_id' => $resource['supplementary_data']['related_ids']['order_id'] ?? null,
+                'custom_id' => $resource['custom_id'] ?? null,
+                'event_type' => $eventType,
+                'resource_type' => $payload['resource_type'] ?? null,
+                'webhook_data' => $payload,
+            ],
+            gatewayReference: $resource['id'] ?? null,
+            amount: $amount !== null ? (float) $amount : null,
+            currency: $currency
+        );
+    }
+
+    /**
+     * Refund a capture. Accepts a capture id, or an order id whose capture is looked up.
+     * An amount of 0 refunds the full capture.
+     */
     public function refund(string $transactionId, float $amount): bool
     {
         try {
-            // First capture the payment if it's an order
-            if (str_starts_with($transactionId, 'order-')) {
-                $order = $this->captureOrder($transactionId);
-                if (isset($order['purchase_units'][0]['payments']['captures'][0]['id'])) {
-                    $transactionId = $order['purchase_units'][0]['payments']['captures'][0]['id'];
-                }
-            }
+            $capture = $this->findCapture($transactionId);
 
-            // Process refund
-            $refundData = $this->processRefund($transactionId, $amount);
+            $refundData = $this->processRefund($capture['id'], $amount, $capture['amount']['currency_code'] ?? 'USD');
 
             $this->log('info', 'PayPal refund processed', [
-                'transaction_id' => $transactionId,
+                'capture_id' => $capture['id'],
                 'refund_id' => $refundData['id'] ?? null,
-                'amount' => $amount
+                'amount' => $amount,
+                'status' => $refundData['status'] ?? null,
             ]);
 
-            return true;
-
+            return in_array($refundData['status'] ?? null, ['COMPLETED', 'PENDING'], true);
         } catch (\Exception $e) {
             $this->log('error', 'PayPal refund failed', [
                 'transaction_id' => $transactionId,
                 'amount' => $amount,
                 'error' => $e->getMessage()
             ]);
-            throw new PaymentException('PayPal refund failed: ' . $e->getMessage());
+            throw new PaymentException('PayPal refund failed: ' . $e->getMessage(), 0, $e);
         }
     }
 
@@ -178,26 +185,45 @@ class PaypalGateway extends AbstractGateway
     public function capturePayment(string $orderId): PaymentResponse
     {
         try {
-            $captureData = $this->captureOrder($orderId);
-
-            $status = $captureData['status'] === 'COMPLETED' ? 'completed' : 'pending';
-            $transactionId = $captureData['purchase_units'][0]['payments']['captures'][0]['id'] ?? null;
-            $amount = $captureData['purchase_units'][0]['payments']['captures'][0]['amount']['value'] ?? 0;
-
-            return new PaymentResponse(
-                success: $captureData['status'] === 'COMPLETED',
-                transactionId: $transactionId,
-                status: $status,
-                data: [
-                    'order_id' => $orderId,
-                    'amount' => $amount,
-                    'capture_data' => $captureData
-                ]
-            );
-
+            return $this->orderToResponse($this->captureOrder($orderId), $orderId);
         } catch (\Exception $e) {
-            throw new PaymentException('PayPal capture failed: ' . $e->getMessage());
+            throw new PaymentException('PayPal capture failed: ' . $e->getMessage(), 0, $e);
         }
+    }
+
+    /**
+     * Build a PaymentResponse from a v2 order representation.
+     */
+    protected function orderToResponse(array $order, string $orderId): PaymentResponse
+    {
+        $unit = $order['purchase_units'][0] ?? [];
+        $capture = $unit['payments']['captures'][0] ?? null;
+        $captured = ($capture['status'] ?? null) === 'COMPLETED';
+
+        $status = match (true) {
+            $captured => 'completed',
+            ($capture['status'] ?? null) === 'PENDING', in_array($order['status'] ?? null, ['CREATED', 'SAVED', 'APPROVED', 'PAYER_ACTION_REQUIRED'], true) => 'pending',
+            ($order['status'] ?? null) === 'VOIDED' => 'canceled',
+            default => 'failed',
+        };
+
+        $amount = $capture['amount'] ?? $unit['amount'] ?? null;
+
+        return new PaymentResponse(
+            success: $captured,
+            transactionId: $capture['id'] ?? $orderId,
+            status: $status,
+            data: [
+                'order_id' => $orderId,
+                'capture_id' => $capture['id'] ?? null,
+                'reference_id' => $unit['reference_id'] ?? null,
+                'order_status' => $order['status'] ?? null,
+                'capture_data' => $order,
+            ],
+            gatewayReference: $orderId,
+            amount: isset($amount['value']) ? (float) $amount['value'] : null,
+            currency: $amount['currency_code'] ?? null
+        );
     }
 
     protected function getEndpoint(string $path): string
@@ -242,22 +268,16 @@ class PaypalGateway extends AbstractGateway
             throw new PaymentException('PayPal client credentials not configured');
         }
 
-        $client = new Client();
-        $response = $client->request('POST', $this->getEndpoint('v1/oauth2/token'), [
-            'auth' => [$clientId, $clientSecret],
-            'form_params' => [
-                'grant_type' => 'client_credentials'
-            ],
-            'headers' => [
-                'Accept' => 'application/json',
-                'Accept-Language' => 'en_US'
-            ]
-        ]);
+        $response = Http::asForm()
+            ->acceptJson()
+            ->timeout(30)
+            ->withBasicAuth($clientId, $clientSecret)
+            ->post($this->getEndpoint('v1/oauth2/token'), ['grant_type' => 'client_credentials']);
 
-        $data = json_decode($response->getBody()->getContents(), true);
+        $data = $response->json() ?? [];
 
-        if (!isset($data['access_token'])) {
-            throw new PaymentException('Failed to get PayPal access token');
+        if (!$response->successful() || !isset($data['access_token'])) {
+            throw new PaymentException('Failed to get PayPal access token: ' . ($data['error_description'] ?? $response->status()));
         }
 
         $this->accessToken = $data['access_token'];
@@ -280,9 +300,9 @@ class PaypalGateway extends AbstractGateway
                 'description' => $request->getDescription() ?? 'Payment',
                 'amount' => [
                     'currency_code' => $request->getCurrency(),
-                    'value' => number_format($request->getAmount(), 2, '.', '')
+                    'value' => number_format($request->getAmount(), $this->currencyDecimals($request->getCurrency()) === 0 ? 0 : 2, '.', '')
                 ],
-                'custom_id' => $request->getMetadata()['custom_id'] ?? null
+                'custom_id' => $request->getMetadata()['custom_id'] ?? $request->getTransactionId(),
             ]],
             'application_context' => [
                 'return_url' => $request->getReturnUrl() ?? route('payment.success'),
@@ -331,67 +351,94 @@ class PaypalGateway extends AbstractGateway
     }
 
     /**
-     * Process refund
+     * Get a PayPal order
      */
-    private function processRefund(string $captureId, float $amount): array
+    private function getOrder(string $orderId): array
     {
-        $accessToken = $this->getAccessToken();
-
-        $payload = [
-            'amount' => [
-                'value' => number_format($amount, 2, '.', ''),
-                'currency_code' => 'USD' // TODO: Get from original transaction
-            ]
-        ];
-
-        $response = $this->makeRequest('POST', "v2/payments/captures/{$captureId}/refund", [
-            'headers' => [
-                'Authorization' => 'Bearer ' . $accessToken,
-                'Content-Type' => 'application/json',
-                'Prefer' => 'return=representation'
-            ],
-            'json' => $payload
+        return $this->makeRequest('GET', "v2/checkout/orders/{$orderId}", [
+            'headers' => ['Authorization' => 'Bearer ' . $this->getAccessToken()],
         ]);
-
-        return $response;
     }
 
     /**
-     * Verify webhook signature
+     * Resolve a capture from a capture id or an order id.
      */
-    private function verifyWebhookSignature(array $payload): bool
+    private function findCapture(string $id): array
     {
-        $webhookId = $this->getConfig('webhook_secret');
+        $headers = ['Authorization' => 'Bearer ' . $this->getAccessToken()];
 
-        if (!$webhookId) {
-            // Skip verification if webhook ID is not configured
-            return true;
+        try {
+            return $this->makeRequest('GET', "v2/payments/captures/{$id}", ['headers' => $headers]);
+        } catch (PaymentException $e) {
+            $order = $this->getOrder($id);
+            $capture = $order['purchase_units'][0]['payments']['captures'][0] ?? null;
+
+            if (!$capture) {
+                throw new PaymentException("No capture found for PayPal id {$id}", 0, $e);
+            }
+
+            return $capture;
+        }
+    }
+
+    /**
+     * Process refund
+     */
+    private function processRefund(string $captureId, float $amount, string $currency): array
+    {
+        $options = [
+            'headers' => [
+                'Authorization' => 'Bearer ' . $this->getAccessToken(),
+                'Content-Type' => 'application/json',
+                'Prefer' => 'return=representation'
+            ],
+        ];
+
+        if ($amount > 0) {
+            $options['json'] = [
+                'amount' => [
+                    'value' => number_format($amount, $this->currencyDecimals($currency) === 0 ? 0 : 2, '.', ''),
+                    'currency_code' => $currency,
+                ]
+            ];
+        } else {
+            $options['body'] = '{}';
+        }
+
+        return $this->makeRequest('POST', "v2/payments/captures/{$captureId}/refund", $options);
+    }
+
+    /**
+     * Verify webhook signature via PayPal's verify-webhook-signature API.
+     * The original raw event JSON is embedded verbatim, as PayPal requires.
+     */
+    private function verifyWebhookSignature(string $rawBody, array $headers, string $webhookId): bool
+    {
+        $fields = [
+            'auth_algo' => $headers['paypal-auth-algo'] ?? '',
+            'cert_url' => $headers['paypal-cert-url'] ?? '',
+            'transmission_id' => $headers['paypal-transmission-id'] ?? '',
+            'transmission_sig' => $headers['paypal-transmission-sig'] ?? '',
+            'transmission_time' => $headers['paypal-transmission-time'] ?? '',
+            'webhook_id' => $webhookId,
+        ];
+
+        if (in_array('', $fields, true) || trim($rawBody) === '') {
+            return false;
         }
 
         try {
-            $headers = getallheaders() ?: [];
-            $authAlgo = $headers['PAYPAL-AUTH-ALGO'] ?? '';
-            $signature = $headers['PAYPAL-TRANSACTION-ID'] ?? '';
-            $certId = $headers['PAYPAL-CERT-ID'] ?? '';
-            $transmissionId = $headers['PAYPAL-TRANSMISSION-ID'] ?? '';
-            $transmissionTime = $headers['PAYPAL-TRANSMISSION-TIME'] ?? '';
-
-            $verificationPayload = [
-                'cert_id' => $certId,
-                'webhook_id' => $webhookId,
-                'transmission_id' => $transmissionId,
-                'transmission_sig' => $signature,
-                'transmission_time' => $transmissionTime,
-                'webhook_event' => $payload,
-                'auth_algo' => $authAlgo
-            ];
+            $body = substr(json_encode($fields), 0, -1) . ',"webhook_event":' . $rawBody . '}';
 
             $response = $this->makeRequest('POST', 'v1/notifications/verify-webhook-signature', [
-                'json' => $verificationPayload
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $this->getAccessToken(),
+                    'Content-Type' => 'application/json',
+                ],
+                'body' => $body,
             ]);
 
-            return $response['verification_status'] === 'SUCCESS';
-
+            return ($response['verification_status'] ?? null) === 'SUCCESS';
         } catch (\Exception $e) {
             $this->log('error', 'Webhook signature verification failed', [
                 'error' => $e->getMessage()
@@ -401,51 +448,17 @@ class PaypalGateway extends AbstractGateway
     }
 
     /**
-     * Make authenticated HTTP request
+     * Make an API request; $url is relative to the PayPal API host.
      */
     protected function makeRequest(string $method, string $url, array $options = []): array
     {
-        $client = $this->createHttpClient();
+        $data = parent::makeRequest($method, $this->getEndpoint($url), $options);
 
-        try {
-            $response = $client->request($method, $url, $options);
-            $body = $response->getBody()->getContents();
-            $data = json_decode($body, true);
-
-            if ($data === null) {
-                throw new PaymentException("Invalid JSON response from PayPal");
-            }
-
-            // Handle PayPal errors
-            if (isset($data['error'])) {
-                $message = $data['error_description'] ?? $data['error'] ?? 'PayPal API error';
-                throw new PaymentException($message);
-            }
-
-            if (isset($data['details']) && is_array($data['details'])) {
-                $messages = array_map(fn($detail) => $detail['description'] ?? '', $data['details']);
-                if (!empty($messages)) {
-                    throw new PaymentException(implode(', ', $messages));
-                }
-            }
-
-            return $data;
-
-        } catch (RequestException $e) {
-            $message = "PayPal API request failed: {$e->getMessage()}";
-
-            if ($e->hasResponse()) {
-                $body = $e->getResponse()->getBody()->getContents();
-                $data = json_decode($body, true);
-
-                if ($data && isset($data['message'])) {
-                    $message = $data['message'];
-                } elseif ($data && isset($data['error_description'])) {
-                    $message = $data['error_description'];
-                }
-            }
-
-            throw new PaymentException($message, 0, $e);
+        if (isset($data['name'], $data['details']) && is_array($data['details'])) {
+            $messages = array_filter(array_map(fn ($detail) => $detail['description'] ?? '', $data['details']));
+            throw new PaymentException($messages ? implode(', ', $messages) : $data['name']);
         }
+
+        return $data;
     }
 }

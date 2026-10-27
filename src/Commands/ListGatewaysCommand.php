@@ -98,7 +98,7 @@ class ListGatewaysCommand extends Command
                 $mode = $gatewayInstance->getMode();
                 $modeKey = $mode . '.' . $key;
 
-                if (!empty($config[$modeKey]) || !empty($config[$key])) {
+                if (!empty(data_get($config, $modeKey)) || !empty($config[$key] ?? null)) {
                     $configuredKeys++;
                 }
             }
@@ -123,26 +123,26 @@ class ListGatewaysCommand extends Command
     {
         $requiredKeys = [
             'paypal' => ['client_id', 'client_secret'],
-            'stripe' => ['secret_key', 'api_key'],
+            'stripe' => ['secret_key'],
             'razorpay' => ['key_id', 'key_secret'],
             'paystack' => ['secret_key'],
             'paytm' => ['merchant_id', 'merchant_key'],
-            'flutterwave' => ['public_key', 'secret_key'],
+            'flutterwave' => ['secret_key'],
             'sslcommerz' => ['store_id', 'store_password'],
             'mollie' => ['api_key'],
             'senangpay' => ['merchant_id', 'secret_key'],
             'bkash' => ['app_key', 'app_secret', 'username', 'password'],
-            'mercadopago' => ['client_id', 'client_secret'],
+            'mercadopago' => ['access_token'],
             'cashfree' => ['app_id', 'secret_key'],
-            'payfast' => ['merchant_id', 'merchant_key', 'pass_phrase'],
-            'skrill' => ['merchant_email', 'api_password'],
-            'phonepe' => ['client_id', 'merchant_user_id', 'key_index', 'secret_key'],
+            'payfast' => ['merchant_id', 'merchant_key'],
+            'skrill' => ['merchant_email', 'secret_word'],
+            'phonepe' => ['merchant_id', 'salt_key'],
             'telr' => ['store_id', 'store_auth_key'],
             'iyzico' => ['api_key', 'secret_key'],
             'pesapal' => ['consumer_key', 'consumer_secret', 'ipn_id'],
-            'midtrans' => ['server_key', 'client_key'],
+            'midtrans' => ['server_key'],
             'myfatoorah' => ['api_key'],
-            'easypaisa' => ['store_id', 'hash_key', 'username', 'password'],
+            'easypaisa' => ['store_id', 'hash_key', 'username', 'password', 'account_num'],
         ];
 
         return $requiredKeys[$gateway] ?? [];

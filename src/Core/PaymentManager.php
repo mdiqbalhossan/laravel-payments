@@ -37,8 +37,10 @@ class PaymentManager
         try {
             $gatewayInstance = $this->gateway($gateway);
             return $gatewayInstance->pay($request);
-        } catch (\Exception $e) {
-            throw new PaymentException("Payment failed: {$e->getMessage()}", 0, $e);
+        } catch (PaymentException $e) {
+            throw $e;
+        } catch (\Throwable $e) {
+            throw new PaymentException("Payment failed: {$e->getMessage()}", 0, $e, $gateway);
         }
     }
 
@@ -50,8 +52,10 @@ class PaymentManager
         try {
             $gatewayInstance = $this->gateway($gateway);
             return $gatewayInstance->verify($payload);
-        } catch (\Exception $e) {
-            throw new PaymentException("Verification failed: {$e->getMessage()}", 0, $e);
+        } catch (PaymentException $e) {
+            throw $e;
+        } catch (\Throwable $e) {
+            throw new PaymentException("Verification failed: {$e->getMessage()}", 0, $e, $gateway);
         }
     }
 
@@ -68,8 +72,10 @@ class PaymentManager
             }
 
             return $gatewayInstance->refund($transactionId, $amount);
-        } catch (\Exception $e) {
-            throw new PaymentException("Refund failed: {$e->getMessage()}", 0, $e);
+        } catch (PaymentException $e) {
+            throw $e;
+        } catch (\Throwable $e) {
+            throw new PaymentException("Refund failed: {$e->getMessage()}", 0, $e, $gateway);
         }
     }
 
@@ -81,7 +87,7 @@ class PaymentManager
         try {
             $gatewayInstance = $this->gateway($gateway);
             return $gatewayInstance->supportsRefund();
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             return false;
         }
     }
@@ -108,7 +114,7 @@ class PaymentManager
     public function setDefaultGateway(string $gateway): self
     {
         if (!$this->hasGateway($gateway)) {
-            throw new GatewayNotFoundException("Gateway {$gateway} not found");
+            throw new GatewayNotFoundException($gateway);
         }
 
         $this->defaultGateway = $gateway;

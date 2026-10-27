@@ -10,6 +10,7 @@ use Mdiqbal\LaravelPayments\Exceptions\PaymentException;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\RequestException;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 
 abstract class AbstractGateway implements PaymentGatewayInterface
@@ -21,7 +22,7 @@ abstract class AbstractGateway implements PaymentGatewayInterface
     public function __construct(array $config = [])
     {
         $this->config = $config;
-        $this->mode = $config['mode'] ?? 'sandbox';
+        $this->mode = $this->normalizeMode($config['mode'] ?? 'sandbox');
         $this->client = $this->createHttpClient();
     }
 
@@ -64,7 +65,7 @@ abstract class AbstractGateway implements PaymentGatewayInterface
     /**
      * Get configuration value
      */
-    public function getConfig(?string $key = null, ?string $default = null): mixed
+    public function getConfig(?string $key = null, mixed $default = null): mixed
     {
         if ($key === null) {
             return $this->config;
@@ -79,7 +80,7 @@ abstract class AbstractGateway implements PaymentGatewayInterface
     public function setConfig(array $config): self
     {
         $this->config = array_merge($this->config, $config);
-        $this->mode = $this->config['mode'] ?? 'sandbox';
+        $this->mode = $this->normalizeMode($this->config['mode'] ?? 'sandbox');
 
         return $this;
     }
@@ -97,10 +98,21 @@ abstract class AbstractGateway implements PaymentGatewayInterface
      */
     public function setMode(string $mode): self
     {
-        $this->mode = $mode;
-        $this->config['mode'] = $mode;
+        $this->mode = $this->normalizeMode($mode);
+        $this->config['mode'] = $this->mode;
 
         return $this;
+    }
+
+    /**
+     * Accept common aliases (test/staging/production) for the two supported modes.
+     */
+    protected function normalizeMode(string $mode): string
+    {
+        return match (strtolower(trim($mode))) {
+            'live', 'production', 'prod' => 'live',
+            default => 'sandbox',
+        };
     }
 
     /**
@@ -137,36 +149,39 @@ abstract class AbstractGateway implements PaymentGatewayInterface
     }
 
     /**
-     * Make HTTP request
+     * Make HTTP request through Laravel's HTTP client (so apps can fake,
+     * log and inspect gateway traffic). $options uses Guzzle option names
+     * (headers, json, body, form_params, query, auth).
      */
     protected function makeRequest(string $method, string $url, array $options = []): array
     {
         try {
-            $response = $this->client->request($method, $url, $options);
-            $body = $response->getBody()->getContents();
-            $data = json_decode($body, true);
-
-            if ($data === null) {
-                throw new PaymentException("Invalid JSON response from {$this->gatewayName()}");
-            }
-
-            return $data;
-        } catch (RequestException $e) {
-            $message = "HTTP request failed: {$e->getMessage()}";
-
-            if ($e->hasResponse()) {
-                $body = $e->getResponse()->getBody()->getContents();
-                $data = json_decode($body, true);
-
-                if ($data && isset($data['message'])) {
-                    $message = $data['message'];
-                }
-            }
-
-            throw new PaymentException($message, 0, $e);
-        } catch (\Exception $e) {
-            throw new PaymentException("Request failed: {$e->getMessage()}", 0, $e);
+            $response = Http::timeout(30)
+                ->acceptJson()
+                ->withUserAgent('Laravel-Payments/2.x')
+                ->send(strtoupper($method), $url, $options);
+        } catch (\Throwable $e) {
+            throw new PaymentException("HTTP request to {$this->gatewayName()} failed: {$e->getMessage()}", 0, $e);
         }
+
+        $data = $response->json();
+
+        if (!$response->successful()) {
+            $message = is_array($data)
+                ? ($data['message'] ?? $data['error_description'] ?? $data['error']['message'] ?? $data['error'] ?? null)
+                : null;
+
+            throw new PaymentException(
+                is_string($message) ? $message : "{$this->gatewayName()} API returned HTTP {$response->status()}",
+                $response->status()
+            );
+        }
+
+        if (!is_array($data)) {
+            throw new PaymentException("Invalid JSON response from {$this->gatewayName()}");
+        }
+
+        return $data;
     }
 
     /**
@@ -184,12 +199,52 @@ abstract class AbstractGateway implements PaymentGatewayInterface
     }
 
     /**
-     * Get configuration value for current mode
+     * Get configuration value for current mode.
+     *
+     * Looks in the mode block first (e.g. "sandbox.secret_key", as published in
+     * config/payments.php) and falls back to a top-level key ("secret_key") so
+     * gateway-wide settings such as webhook secrets work in either place.
      */
     protected function getModeConfig(string $key, mixed $default = null): mixed
     {
-        $modeKey = "{$this->mode}.{$key}";
-        return $this->getConfig($modeKey, $default);
+        $value = $this->getConfig("{$this->mode}.{$key}");
+
+        if ($value === null || $value === '') {
+            $value = $this->getConfig($key);
+        }
+
+        return ($value === null || $value === '') ? $default : $value;
+    }
+
+    /**
+     * Get a required mode config value or fail loudly.
+     */
+    protected function requireModeConfig(string $key): mixed
+    {
+        $value = $this->getModeConfig($key);
+
+        if ($value === null || $value === '') {
+            throw PaymentException::configuration(
+                $this->gatewayName(),
+                "Missing '{$key}' for {$this->mode} mode (payments.gateways.{$this->gatewayName()}.{$this->mode}.{$key})"
+            );
+        }
+
+        return $value;
+    }
+
+    /**
+     * Handle an incoming webhook/IPN request.
+     *
+     * Gateways that sign webhooks should override this and verify $rawBody
+     * against the provider's signature header before trusting $payload.
+     * Throw InvalidSignatureException when verification fails.
+     *
+     * @param array<string, string> $headers lower-cased header name => value
+     */
+    public function handleWebhook(array $payload, string $rawBody, array $headers): PaymentResponse
+    {
+        return $this->verify($payload);
     }
 
     /**
@@ -228,12 +283,46 @@ abstract class AbstractGateway implements PaymentGatewayInterface
     }
 
     /**
+     * Number of decimal places in the currency's minor unit (ISO 4217).
+     */
+    protected function currencyDecimals(string $currency): int
+    {
+        $currency = strtoupper($currency);
+
+        if (in_array($currency, ['BIF', 'CLP', 'DJF', 'GNF', 'ISK', 'JPY', 'KMF', 'KRW', 'MGA', 'PYG', 'RWF', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF'], true)) {
+            return 0;
+        }
+
+        if (in_array($currency, ['BHD', 'IQD', 'JOD', 'KWD', 'LYD', 'OMR', 'TND'], true)) {
+            return 3;
+        }
+
+        return 2;
+    }
+
+    /**
+     * Convert a major-unit amount (e.g. 10.50 USD) to integer minor units (1050).
+     */
+    protected function toMinorUnits(float $amount, string $currency): int
+    {
+        return (int) round($amount * (10 ** $this->currencyDecimals($currency)));
+    }
+
+    /**
+     * Convert integer minor units back to a major-unit amount.
+     */
+    protected function fromMinorUnits(int|float|string|null $amount, string $currency): float
+    {
+        return ((float) $amount) / (10 ** $this->currencyDecimals($currency));
+    }
+
+    /**
      * Validate webhook signature
      */
     protected function validateWebhookSignature(array $payload, string $signature): bool
     {
-        // Default implementation - should be overridden by gateways
-        return true;
+        // Never trust a signature that was not actually checked
+        return false;
     }
 
     /**

@@ -6,6 +6,7 @@ use Illuminate\Support\Facades\Http;
 use Mdiqbal\LaravelPayments\Core\AbstractGateway;
 use Mdiqbal\LaravelPayments\DTO\PaymentRequest;
 use Mdiqbal\LaravelPayments\DTO\PaymentResponse;
+use Mdiqbal\LaravelPayments\Exceptions\InvalidSignatureException;
 use Mdiqbal\LaravelPayments\Exceptions\PaymentException;
 
 class PaystackGateway extends AbstractGateway
@@ -97,7 +98,7 @@ class PaystackGateway extends AbstractGateway
             }
 
             // Verify transaction from Paystack
-            $response = $this->makePaystackRequest('GET', '/transaction/verify/' . $reference);
+            $response = $this->makePaystackRequest('GET', '/transaction/verify/' . rawurlencode($reference));
             $transaction = $response['data'] ?? [];
 
             if (!isset($transaction['status'])) {
@@ -119,13 +120,18 @@ class PaystackGateway extends AbstractGateway
                 'currency' => $transaction['currency'] ?? 'NGN'
             ]);
 
+            $currency = $transaction['currency'] ?? 'NGN';
+
             return new PaymentResponse(
                 success: $transaction['status'] === 'success',
                 transactionId: $transaction['reference'] ?? $reference,
                 status: $status,
+                gatewayReference: isset($transaction['id']) ? (string) $transaction['id'] : null,
+                amount: $this->fromMinorUnits($transaction['amount'] ?? 0, $currency),
+                currency: $currency,
                 data: [
                     'reference' => $transaction['reference'] ?? $reference,
-                    'amount' => ($transaction['amount'] ?? 0) / 100, // Convert from kobo/cents
+                    'amount' => $this->fromMinorUnits($transaction['amount'] ?? 0, $currency),
                     'currency' => $transaction['currency'] ?? 'NGN',
                     'gateway_response' => $transaction['gateway_response'] ?? null,
                     'paid_at' => $transaction['paid_at'] ?? null,
@@ -148,8 +154,24 @@ class PaystackGateway extends AbstractGateway
                 'error' => $e->getMessage(),
                 'payload' => $payload
             ]);
-            throw new PaymentException('Paystack payment verification failed: ' . $e->getMessage());
+            throw new PaymentException('Paystack payment verification failed: ' . $e->getMessage(), 0, $e);
         }
+    }
+
+    /**
+     * Handle a Paystack webhook: checks x-paystack-signature (HMAC-SHA512 of
+     * the raw body with the secret key), then re-verifies the transaction.
+     */
+    public function handleWebhook(array $payload, string $rawBody, array $headers): PaymentResponse
+    {
+        $secretKey = $this->getSecretKey();
+        $signature = $headers['x-paystack-signature'] ?? '';
+
+        if (!$secretKey || $signature === '' || !hash_equals(hash_hmac('sha512', $rawBody, $secretKey), $signature)) {
+            throw new InvalidSignatureException('Invalid Paystack webhook signature', gateway: 'paystack');
+        }
+
+        return $this->verify($payload);
     }
 
     public function refund(string $transactionId, float $amount): bool
@@ -194,21 +216,7 @@ class PaystackGateway extends AbstractGateway
      */
     public function getPublicKey(): ?string
     {
-        $secretKey = $this->getSecretKey();
-        
-        if (!$secretKey) {
-            return null;
-        }
-
-        // Paystack public key is derived from secret key
-        // sk_test_xxx -> pk_test_xxx, sk_live_xxx -> pk_live_xxx
-        if (str_starts_with($secretKey, 'sk_test_')) {
-            return str_replace('sk_test_', 'pk_test_', $secretKey);
-        } elseif (str_starts_with($secretKey, 'sk_live_')) {
-            return str_replace('sk_live_', 'pk_live_', $secretKey);
-        }
-
-        return null;
+        return $this->getModeConfig('public_key');
     }
 
     /**
@@ -216,22 +224,24 @@ class PaystackGateway extends AbstractGateway
      */
     private function createTransaction(PaymentRequest $request): array
     {
-        $amountInKobo = (int) round($request->getAmount() * 100);
         $metadata = $request->getMetadata();
         $reference = $request->getTransactionId() ?? $this->generateOrderId();
+        $currency = strtoupper($request->getCurrency() ?: 'NGN');
+        $amountInKobo = $this->toMinorUnits($request->getAmount(), $currency);
+        $email = $request->getEmail() ?? $metadata['email'] ?? null;
 
-        $currency = strtoupper($request->getCurrency() ?? 'ZAR'); // Default to ZAR
-        
+        if (!$email) {
+            throw new PaymentException('Paystack requires a customer email');
+        }
+
         $transactionData = [
             'amount' => $amountInKobo,
-            'email' => $metadata['email'] ?? 'customer@example.com',
+            'email' => $email,
             'reference' => $reference,
             'currency' => $currency,
             'callback_url' => $request->getReturnUrl() ?? route('payment.callback'),
         ];
         
-        // Paystack supports: NGN, GHS, ZAR, USD
-        // Currency is always included (defaults to ZAR if not specified)
 
         // Add optional fields
         if (isset($metadata['callback_url'])) {
@@ -296,13 +306,12 @@ class PaystackGateway extends AbstractGateway
             'transaction' => $reference,
         ];
 
-        // Refund specific amount if provided (partial refund)
+        // Refund specific amount if provided (partial refund); amount is in the
+        // transaction's subunit, so look the currency up first
         if ($amount > 0) {
-            $refundData['amount'] = (int) round($amount * 100);
+            $transaction = $this->makePaystackRequest('GET', '/transaction/verify/' . rawurlencode($reference))['data'] ?? [];
+            $refundData['amount'] = $this->toMinorUnits($amount, $transaction['currency'] ?? 'NGN');
         }
-
-        // Add currency if needed (defaults to NGN)
-        $refundData['currency'] = 'NGN';
 
         $response = $this->makePaystackRequest('POST', '/refund', $refundData);
         return $response['data'] ?? [];
@@ -416,7 +425,7 @@ class PaystackGateway extends AbstractGateway
     public function fetchTransaction(string $reference): PaymentResponse
     {
         try {
-            $response = $this->makePaystackRequest('GET', '/transaction/verify/' . $reference);
+            $response = $this->makePaystackRequest('GET', '/transaction/verify/' . rawurlencode($reference));
             $transaction = $response['data'] ?? [];
 
             $status = match($transaction['status'] ?? 'unknown') {

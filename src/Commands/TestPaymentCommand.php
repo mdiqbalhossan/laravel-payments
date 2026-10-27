@@ -106,7 +106,7 @@ class TestPaymentCommand extends Command
     protected function testGateway(string $gateway, float $amount, string $currency, string $email, string $mode)
     {
         $this->info("\n🔍 Testing Gateway: " . strtoupper($gateway));
-        $this->str_repeat('-', 40);
+        $this->line(str_repeat('-', 40));
 
         try {
             // Check if gateway exists
@@ -129,12 +129,18 @@ class TestPaymentCommand extends Command
             } else {
                 $this->info("✅ Configuration loaded");
 
-                // Show masked credentials
-                foreach ($config as $key => $value) {
+                // Show masked credentials of the active mode
+                $active = array_merge(
+                    array_filter($config, fn ($v) => !is_array($v)),
+                    (array) ($config[$gatewayInstance->getMode()] ?? [])
+                );
+
+                foreach ($active as $key => $value) {
                     if (is_string($value) && !empty($value)) {
                         if (str_contains(strtolower($key), 'secret') ||
                             str_contains(strtolower($key), 'key') ||
-                            str_contains(strtolower($key), 'password')) {
+                            str_contains(strtolower($key), 'password') ||
+                            str_contains(strtolower($key), 'token')) {
                             $masked = str_repeat('*', max(4, strlen($value) - 4)) . substr($value, -4);
                             $this->line("   {$key}: {$masked}");
                         } else {
@@ -146,13 +152,15 @@ class TestPaymentCommand extends Command
 
             // Test payment request
             $request = new PaymentRequest(
-                orderId: 'TEST_' . time() . '_' . uniqid(),
                 amount: $amount,
                 currency: $currency,
-                customerEmail: $email,
-                callbackUrl: 'https://example.com/callback',
-                webhookUrl: 'https://example.com/webhook',
-                description: "Test payment for {$gateway} gateway"
+                description: "Test payment for {$gateway} gateway",
+                orderId: 'TEST_' . time() . '_' . substr(uniqid(), -6),
+                email: $email,
+                customer: ['name' => 'Test Customer', 'phone' => '01700000000'],
+                returnUrl: url('/payments/test/return'),
+                cancelUrl: url('/payments/test/cancel'),
+                notifyUrl: url("/payments/webhook/{$gateway}")
             );
 
             // Process payment
@@ -182,17 +190,9 @@ class TestPaymentCommand extends Command
 
             $table->render();
 
-            // Test refund if supported
-            if ($gatewayInstance->supportsRefund() && $response->transactionId) {
-                $this->info("\n💰 Testing Refund...");
-                try {
-                    $refundResult = $gatewayInstance->refund($response->transactionId, $amount / 2);
-                    $this->info("✅ Refund test: " . ($refundResult ? 'Success' : 'Failed'));
-                } catch (\Exception $e) {
-                    $this->warn("⚠️  Refund test failed: " . $e->getMessage());
-                }
+            if ($response->redirectUrl) {
+                $this->line("\nOpen the redirect URL to complete the sandbox payment, then verify it with Payment::verify('{$gateway}', ...).");
             }
-
         } catch (\Exception $e) {
             $this->error("❌ Error: " . $e->getMessage());
 

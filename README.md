@@ -7,30 +7,10 @@ A comprehensive Laravel package for integrating multiple payment gateways into y
 - [Features](#features)
 - [Supported Gateways](#supported-gateways)
 - [Installation](#installation)
+- [Upgrading to 3.x](#upgrading-to-3x)
 - [Configuration](#configuration)
 - [Basic Usage](#basic-usage)
-- [Gateway Documentation](#gateway-documentation)
-  - [Stripe](#stripe)
-  - [PayPal](#paypal)
-  - [Paystack](#paystack)
-  - [Razorpay](#razorpay)
-  - [PayTM](#paytm)
-  - [Flutterwave](#flutterwave)
-  - [SSLCommerz](#sslcommerz)
-  - [Mollie](#mollie)
-  - [SenangPay](#senangpay)
-  - [bKash](#bkash)
-  - [Mercado Pago](#mercado-pago)
-  - [Cashfree](#cashfree)
-  - [PayFast](#payfast)
-  - [Skrill](#skrill)
-  - [PhonePe](#phonepe)
-  - [Telr](#telr)
-  - [iyzico](#iyzico)
-  - [Pesapal](#pesapal)
-  - [Midtrans](#midtrans)
-  - [MyFatoorah](#myfatoorah)
-  - [EasyPaisa](#easypaisa)
+- [Gateway reference](#gateway-reference)
 - [Testing](#testing)
 - [Contributing](#contributing)
 - [License](#license)
@@ -38,7 +18,7 @@ A comprehensive Laravel package for integrating multiple payment gateways into y
 ## Features
 
 - **Unified Interface**: Single API for all payment gateways
-- **Multiple Gateways**: Support for 20+ payment gateways
+- **Multiple Gateways**: Support for 21 payment gateways
 - **Secure**: Built with security best practices
 - **Flexible**: Easy to extend with new gateways
 - **Laravel Ready**: Built specifically for Laravel
@@ -77,7 +57,7 @@ A comprehensive Laravel package for integrating multiple payment gateways into y
 1. Install the package via Composer:
 
 ```bash
-composer require mdiqbal/laravel-payments
+composer require mdiqbal/laravel-payments:^3.0
 ```
 
 2. Publish the configuration file:
@@ -90,7 +70,7 @@ php artisan vendor:publish --provider="Mdiqbal\LaravelPayments\PaymentsServicePr
 
 ```env
 # Example for Stripe
-STRIPE_MODE=test
+STRIPE_MODE=sandbox  # sandbox | live
 STRIPE_SANDBOX_SECRET=your_sandbox_secret_key
 STRIPE_SANDBOX_KEY=your_sandbox_publishable_key
 STRIPE_LIVE_SECRET=your_live_secret_key
@@ -111,6 +91,46 @@ MERCADOPAGO_LIVE_ACCESS_TOKEN=your_live_access_token
 MERCADOPAGO_COUNTRY=MX
 MERCADOPAGO_WEBHOOK_SECRET=your_webhook_secret
 ```
+
+## Upgrading to 3.x
+
+Version 3.0 fixes the issues found in the QA pass over all 21 gateways (see
+[QA_REPORT.md](QA_REPORT.md) and [CHANGELOG.md](CHANGELOG.md)). To update an existing project:
+
+```bash
+# 1. Update the package
+composer require mdiqbal/laravel-payments:^3.0
+
+# 2. Remove the gateway SDKs 2.x pulled in (3.0 no longer needs them).
+#    Skip any your own code still uses.
+composer remove srmklive/paypal flutterwavedev/flutterwave-v3 raziul/sslcommerz-laravel \
+    mollie/laravel-mollie sabitahmad/laravel-bkash loveycom/cashfree yogeshgupta/phonepe-laravel \
+    njoguamos/laravel-pesapal midtrans/midtrans-php myfatoorah/laravel-package zfhassaan/easypaisa
+
+# 3. Re-publish the config (back up config/payments.php first if you changed it)
+php artisan vendor:publish --provider="Mdiqbal\LaravelPayments\PaymentsServiceProvider" --tag=config --force
+
+# 4. Clear cached config
+php artisan config:clear
+```
+
+If you only want bug fixes inside the 3.x line later, `composer update mdiqbal/laravel-payments` is enough.
+
+**Breaking changes to check in your code:**
+
+- Credentials must be in the `sandbox` / `live` blocks of `config/payments.php`; missing ones now
+  throw `PaymentException` instead of falling back to fake "mock" responses.
+- `{GATEWAY}_MODE` must be `sandbox` or `live` (`test`/`production` are accepted as aliases).
+- Webhooks are signature-checked. Add the new `.env` keys for the gateways you use:
+  `STRIPE_WEBHOOK_SECRET`, `PAYPAL_WEBHOOK_SECRET` (the PayPal Webhook ID), `RAZORPAY_WEBHOOK_SECRET`,
+  `FLUTTERWAVE_SECRET_HASH`, `SKRILL_*_SECRET_WORD`, `EASYPAISA_*_ACCOUNT_NUM`,
+  `PHONEPE_*_MERCHANT_ID` / `PHONEPE_*_SALT_KEY` / `PHONEPE_*_SALT_INDEX` (the old PhonePe names still work).
+- Use `Payment::pay($gateway, $request)` / `Payment::verify($gateway, $payload)`; see the
+  [Gateway reference](#gateway-reference) for the payload each gateway's `verify()` expects.
+- Check `$response->matchesAmount($order->total, $order->currency)` before marking an order paid.
+- Gateway-specific helpers that returned fake data (e.g. SSLCommerz `createSubscription()`,
+  Flutterwave payment-link and transfer helpers) were removed.
+- senangPay, PayFast, Skrill, Telr and Easypaisa report `supportsRefund() === false`.
 
 ## Configuration
 
@@ -154,311 +174,109 @@ return [
 
 ## Basic Usage
 
-### Making a Payment
+### 1. Start a payment
 
 ```php
 use Mdiqbal\LaravelPayments\Facades\Payment;
 use Mdiqbal\LaravelPayments\DTO\PaymentRequest;
 
-// Create a payment request
-$paymentRequest = new PaymentRequest(
-    amount: 100.00,
-    currency: 'USD',
-    description: 'Payment for Order #12345'
+$request = new PaymentRequest(
+    amount: 1500.00,
+    currency: 'BDT',
+    description: 'Order #1001',
+    orderId: (string) $order->id,          // your reference (tran_id / tx_ref / m_payment_id ...)
+    email: $user->email,
+    customer: ['name' => $user->name, 'phone' => $user->phone],
+    returnUrl: route('payment.return', 'sslcommerz'),
+    cancelUrl: route('payment.cancel'),
+    notifyUrl: url('/payments/webhook/sslcommerz'), // IPN / webhook (package route)
 );
 
-// Set optional parameters
-$paymentRequest->setTransactionId('order_' . uniqid());
-$paymentRequest->setReturnUrl(route('payment.success'));
-$paymentRequest->setCancelUrl(route('payment.cancel'));
+$response = Payment::pay('sslcommerz', $request);   // throws PaymentException on failure
 
-// Process payment with default gateway
-$response = Payment::pay($paymentRequest);
+// Store the gateway transaction id with the order: you need it for verify()/refund()
+$order->update(['gateway_txn' => $response->transactionId]);
 
-// Or process with a specific gateway
-$response = Payment::gateway('stripe')->pay($paymentRequest);
+if ($response->requiresRedirect()) {
+    // Some gateways need a form POST instead of a GET redirect:
+    // $response->getData('redirect_method') === 'POST' with $response->getData('form_params')
+    return redirect()->away($response->redirectUrl);
+}
 
-// Handle response
-if ($response->isSuccess()) {
-    if ($response->isRedirect()) {
-        return redirect($response->getRedirectUrl());
+// Stripe (client_secret) and Cashfree (payment_session_id) return data for their JS SDKs
+```
+
+### 2. Verify when the customer returns
+
+`verify()` never trusts the callback data alone: it checks the gateway signature and/or
+re-reads the transaction from the provider's API.
+
+```php
+public function return(Request $request, string $gateway)
+{
+    $result = Payment::verify($gateway, $request->all());
+
+    // Always compare the confirmed amount with your order before fulfilling it
+    if ($result->success && $result->matchesAmount($order->total, $order->currency)) {
+        $order->markPaid($result->transactionId);
     }
-
-    $transactionId = $response->getTransactionId();
-    // Save transaction ID to database
-} else {
-    $errorMessage = $response->getMessage();
-    // Handle error
 }
 ```
 
-### Retrieving Payment Status
+### 3. Webhooks / IPN
+
+The package registers `POST /payments/webhook/{gateway}`. Each gateway verifies its own
+signature header against the raw request body (configure the secrets below), then
+`Mdiqbal\LaravelPayments\Events\WebhookHandled` is dispatched:
 
 ```php
-use Mdiqbal\LaravelPayments\Facades\Payment;
-
-$transactionId = 'txn_1234567890';
-$response = Payment::gateway('stripe')->retrievePayment($transactionId);
-
-if ($response->isSuccess()) {
-    $status = $response->getData()['status'];
-    $amount = $response->getData()['amount'];
-    // Update order status
-}
-```
-
-### Processing Refunds
-
-```php
-use Mdiqbal\LaravelPayments\Facades\Payment;
-
-$transactionId = 'txn_1234567890';
-$refundAmount = 50.00;
-$reason = 'Customer requested refund';
-
-try {
-    $success = Payment::gateway('stripe')->refund($transactionId, $refundAmount, $reason);
-
-    if ($success) {
-        // Refund processed successfully
+Event::listen(WebhookHandled::class, function (WebhookHandled $event) {
+    if ($event->response->success) {
+        // look up the order by $event->response->transactionId and check matchesAmount()
     }
-} catch (\Exception $e) {
-    // Handle refund failure
+});
+```
+
+Exclude the route from CSRF if you use the `web` middleware group. Responses: `200`
+accepted, `400` rejected/not paid, `401` bad signature.
+
+### 4. Refunds
+
+```php
+if (Payment::supportsRefund('stripe')) {
+    Payment::refund('stripe', $paymentIntentId, 50.00);   // 0 = full refund where supported
 }
 ```
 
-## Gateway Documentation
+## Gateway reference
 
-### Stripe
-[View Full Documentation →](docs/stripe-integration.md)
+| Gateway | Transaction id returned by `pay()` | `verify()` input | Webhook secret / check | Refund |
+|---|---|---|---|---|
+| Stripe | PaymentIntent id (`client_secret` in data) | `payment_intent` or `session_id` | `webhook_secret` (whsec) | ✔ |
+| PayPal | Order id (approve link) | `token` (order id); captures APPROVED orders | `webhook_secret` = Webhook ID (verified via PayPal API) | ✔ capture id or order id |
+| Razorpay | Order id (use with Checkout.js) | `razorpay_order_id`, `razorpay_payment_id`, `razorpay_signature` | `webhook_secret` | ✔ payment id |
+| Paystack | reference | `reference` | secret key (`x-paystack-signature`) | ✔ |
+| Paytm | orderId (POST `form_params` to payment page) | callback POST (CHECKSUMHASH) | — | ✔ |
+| Flutterwave | tx_ref | `transaction_id` / `tx_ref` | `secret_hash` (`verif-hash`) | ✔ |
+| SSLCommerz | tran_id | callback POST (`val_id`) | IPN `verify_sign` | ✔ |
+| Mollie | `tr_...` id | `id` | not signed; API re-check | ✔ |
+| senangPay | order_id | return/callback params (`hash`) | HMAC-SHA256 hash | ✘ |
+| bKash | paymentID | `paymentID`, `status` (executes payment) | API re-check | ✔ paymentID |
+| Mercado Pago | order id (preference) | `payment_id` / `data.id` | optional `webhook_secret` (`x-signature`) | ✔ payment id |
+| Cashfree | order_id (`payment_session_id` for JS SDK) | `order_id` | secret key (`x-webhook-signature`) | ✔ |
+| PayFast | m_payment_id (POST `form_params`) | ITN POST | ITN signature + server validation | ✘ |
+| Skrill | transaction_id | status_url POST (`md5sig`) | `secret_word` | ✘ |
+| PhonePe | merchantTransactionId | `merchantTransactionId` | salt key (`X-VERIFY`) | ✔ |
+| Telr | order ref (store it!) | `order_ref` | API re-check | ✘ |
+| iyzico | checkout token | `token` | API re-check | ✔ paymentId |
+| Pesapal | order_tracking_id | `OrderTrackingId` | API re-check (set `ipn_id`) | ✔ |
+| Midtrans | order_id (`snap_token` in data) | `order_id` | server key (`signature_key`) | ✔ |
+| MyFatoorah | your order id (InvoiceId in data) | `paymentId` | optional `webhook_secret` | ✔ InvoiceId |
+| Easypaisa | orderRefNum (POST `form_params`) | `orderRefNumber` | API re-check | ✘ |
 
-Stripe is a global payment gateway accepting cards, digital wallets, and local payment methods. Ideal for international businesses.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('stripe')->pay($paymentRequest);
-$clientSecret = $response->getData()['client_secret'];
-```
-
-### PayPal
-[View Full Documentation →](docs/paypal-integration.md)
-
-PayPal provides a trusted payment solution with support for PayPal accounts, cards, and alternative payment methods.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('paypal')->pay($paymentRequest);
-$approvalUrl = $response->getRedirectUrl();
-```
-
-### Paystack
-[View Full Documentation →](docs/paystack-integration.md)
-
-Paystack is the leading payment gateway in Africa, supporting cards, bank transfers, and mobile money.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('paystack')->pay($paymentRequest);
-$authorizationUrl = $response->getRedirectUrl();
-```
-
-### Razorpay
-[View Full Documentation →](docs/razorpay-integration.md)
-
-Razorpay is India's payment solution supporting UPI, cards, net banking, and popular wallets.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('razorpay')->pay($paymentRequest);
-$orderId = $response->getData()['id'];
-```
-
-### PayTM
-[View Full Documentation →](docs/paytm-integration.md)
-
-PayTM is one of India's largest digital payment platforms supporting wallet, cards, and UPI payments.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('paytm')->pay($paymentRequest);
-$txnToken = $response->getData()['txnToken'];
-```
-
-### Flutterwave
-[View Full Documentation →](docs/flutterwave-integration.md)
-
-Flutterwave powers payments across Africa with support for cards, mobile money, and bank transfers.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('flutterwave')->pay($paymentRequest);
-$paymentLink = $response->getRedirectUrl();
-```
-
-### SSLCommerz
-[View Full Documentation →](docs/sslcommerz-integration.md)
-
-SSLCommerz is Bangladesh's leading payment gateway with support for cards, mobile banking, and bank transfers.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('sslcommerz')->pay($paymentRequest);
-$gatewayUrl = $response->getRedirectUrl();
-```
-
-### Mollie
-[View Full Documentation →](docs/mollie-integration.md)
-
-Mollie is a European payment gateway supporting iDEAL, credit cards, Bancontact, and other local payment methods.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('mollie')->pay($paymentRequest);
-$checkoutUrl = $response->getRedirectUrl();
-```
-
-### SenangPay
-[View Full Documentation →](docs/senangpay-integration.md)
-
-SenangPay is Malaysia's payment gateway supporting FPX, online banking, and credit cards.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('senangpay')->pay($paymentRequest);
-$paymentUrl = $response->getRedirectUrl();
-```
-
-### bKash
-[View Full Documentation →](docs/bkash-integration.md)
-
-bKash is Bangladesh's largest mobile financial service providing mobile wallet payments.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('bkash')->pay($paymentRequest);
-$paymentID = $response->getData()['paymentID'];
-```
-
-### Mercado Pago
-[View Full Documentation →](docs/mercadopago-integration.md)
-
-Mercado Pago is Latin America's leading payment platform supporting various local payment methods.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('mercadopago')->pay($paymentRequest);
-$initPoint = $response->getData()['init_point'];
-```
-
-### Cashfree
-[View Full Documentation →](docs/cashfree-integration.md)
-
-Cashfree is an Indian payment gateway supporting UPI, cards, net banking, and wallets.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('cashfree')->pay($paymentRequest);
-$paymentLink = $response->getRedirectUrl();
-```
-
-### PayFast
-[View Full Documentation →](docs/payfast-integration.md)
-
-PayFast is South Africa's payment gateway supporting cards, EFT, and various payment methods.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('payfast')->pay($paymentRequest);
-$redirectUrl = $response->getRedirectUrl();
-```
-
-### Skrill
-[View Full Documentation →](docs/skrill-integration.md)
-
-Skrill is a global payment solution supporting wallet transfers, cards, and bank transfers.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('skrill')->pay($paymentRequest);
-$sessionId = $response->getData()['sessionid'];
-```
-
-### PhonePe
-[View Full Documentation →](docs/phonepe-integration.md)
-
-PhonePe is India's UPI-based payment platform supporting UPI, cards, and wallets.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('phonepe')->pay($paymentRequest);
-$paymentUrl = $response->getRedirectUrl();
-```
-
-### Telr
-[View Full Documentation →](docs/telr-integration.md)
-
-Telr is a Middle East payment gateway supporting cards, Knet, Sadad, and other local methods.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('telr')->pay($paymentRequest);
-$orderUrl = $response->getRedirectUrl();
-```
-
-### iyzico
-[View Full Documentation →](docs/iyzico-integration.md)
-
-iyzico is Turkey's payment platform supporting cards, bank transfers, and digital wallets.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('iyzico')->pay($paymentRequest);
-$paymentPageUrl = $response->getData()['paymentPageUrl'];
-```
-
-### Pesapal
-[View Full Documentation →](docs/pesapal-integration.md)
-
-Pesapal provides payment solutions across Africa with support for cards and mobile money.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('pesapal')->pay($paymentRequest);
-$redirectUrl = $response->getRedirectUrl();
-```
-
-### Midtrans
-[View Full Documentation →](docs/midtrans-integration.md)
-
-Midtrans is Indonesia's payment gateway supporting cards, bank transfers, and e-wallets.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('midtrans')->pay($paymentRequest);
-$redirectUrl = $response->getRedirectUrl();
-```
-
-### MyFatoorah
-[View Full Documentation →](docs/myfatoorah-integration.md)
-
-MyFatoorah is a Middle East payment platform supporting Knet, Benefit, and other local methods.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('myfatoorah')->pay($paymentRequest);
-$invoiceURL = $response->getData()['InvoiceURL'];
-```
-
-### EasyPaisa
-[View Full Documentation →](docs/easypaisa-integration.md)
-
-EasyPaisa is Pakistan's mobile banking platform supporting wallet payments and bank transfers.
-
-**Quick Start:**
-```php
-$response = Payment::gateway('easypaisa')->pay($paymentRequest);
-$transactionUrl = $response->getRedirectUrl();
-```
+Credentials always live in the `sandbox` / `live` block of `config/payments.php`;
+missing credentials throw a `PaymentException` (there are no silent mock fallbacks).
+Test every gateway you enable against its sandbox before going live.
 
 ## Testing
 
@@ -481,7 +299,7 @@ Set test mode in your `.env.testing` file:
 
 ```env
 PAYMENT_DEFAULT_GATEWAY=stripe
-STRIPE_MODE=test
+STRIPE_MODE=sandbox  # sandbox | live
 STRIPE_SANDBOX_SECRET=sk_test_xxxxxxxxxxxxxx
 STRIPE_SANDBOX_KEY=pk_test_xxxxxxxxxxxxxx
 ```

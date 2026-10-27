@@ -2,815 +2,300 @@
 
 namespace Mdiqbal\LaravelPayments\Gateways\Sslcommerz;
 
-use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Log;
 use Mdiqbal\LaravelPayments\Core\AbstractGateway;
 use Mdiqbal\LaravelPayments\DTO\PaymentRequest;
 use Mdiqbal\LaravelPayments\DTO\PaymentResponse;
+use Mdiqbal\LaravelPayments\Exceptions\InvalidSignatureException;
+use Mdiqbal\LaravelPayments\Exceptions\PaymentException;
 
-// SSLCommerz SDK will be loaded dynamically
-
+/**
+ * SSLCommerz hosted checkout (API v4).
+ *
+ * Flow: pay() returns GatewayPageURL to redirect to. SSLCommerz then POSTs the
+ * customer back to success/fail/cancel URLs and sends an IPN. Call verify()
+ * with that POST data (it must contain val_id, or at least tran_id): the
+ * transaction is always confirmed with the SSLCommerz validation API.
+ */
 class SslcommerzGateway extends AbstractGateway
 {
-    /**
-     * SSLCommerz instance
-     */
-    protected $sslcommerz;
-
-    /**
-     * Gateway configuration
-     */
-    protected array $config = [];
-
-    /**
-     * Supported currencies
-     */
     protected array $supportedCurrencies = [
-        'BDT', 'USD', 'EUR', 'GBP', 'AUD', 'CAD', 'SGD',
-        'MYR', 'THB', 'IDR', 'PHP', 'AED', 'SAR', 'QAR',
-        'OMR', 'BHD', 'KWD', 'JOD', 'LBP',
+        'BDT', 'USD', 'EUR', 'GBP', 'AUD', 'CAD', 'SGD', 'MYR', 'INR',
+        'THB', 'AED', 'SAR', 'QAR', 'OMR', 'KWD', 'BHD', 'JPY', 'CHF',
     ];
 
-    /**
-     * Constructor
-     */
-    public function __construct(array $config = [])
-    {
-        // Handle nested config structure from PaymentServiceProvider
-        $mode = $config['mode'] ?? 'sandbox';
-        $modeConfig = $config[$mode] ?? [];
-
-        // Merge config with priority: passed config > mode-specific config > default config
-        $this->config = array_merge([
-            'store_id' => config('services.sslcommerz.store_id'),
-            'store_password' => config('services.sslcommerz.store_password'),
-            'test_mode' => config('services.sslcommerz.test_mode', true),
-            'success_url' => config('services.sslcommerz.success_url'),
-            'fail_url' => config('services.sslcommerz.fail_url'),
-            'cancel_url' => config('services.sslcommerz.cancel_url'),
-            'ipn_url' => config('services.sslcommerz.ipn_url'),
-        ], $modeConfig, $config);
-
-        // Set test_mode based on mode
-        $this->config['test_mode'] = $mode === 'sandbox';
-        $this->config['mode'] = $mode;
-
-        $this->initializeSslcommerz();
-    }
-
-    /**
-     * Initialize SSLCommerz SDK
-     */
-    protected function initializeSslcommerz()
-    {
-        try {
-            // Try to create SSLCommerz instance
-            if (class_exists('Raziul\SslCommerz\SslCommerz')) {
-                $this->sslcommerz = new \Raziul\SslCommerz\SslCommerz(
-                    $this->config['store_id'],
-                    $this->config['store_password'],
-                    $this->config['test_mode']
-                );
-            } else {
-                // Fallback: Create a mock implementation that can be used for testing
-                $this->sslcommerz = new class($this->config['store_id'], $this->config['store_password'], $this->config['test_mode'])
-                {
-                    private $config;
-
-                    public function __construct($storeId, $storePassword, $testMode)
-                    {
-                        $this->config = [
-                            'store_id' => $storeId,
-                            'store_password' => $storePassword,
-                            'test_mode' => $testMode,
-                        ];
-                    }
-
-                    public function makePayment($data, $type)
-                    {
-                        Log::warning('SSLCommerz SDK not available, making direct API call', $data);
-
-                        // Make direct API call to SSLCommerz since SDK is not available
-                        $apiUrl = $this->config['test_mode']
-                            ? 'https://sandbox.sslcommerz.com/gwprocess/v3/api.php'
-                            : 'https://securepay.sslcommerz.com/gwprocess/v3/api.php';
-
-                        // Validate store credentials
-                        if (empty($this->config['store_id']) || empty($this->config['store_password'])) {
-                            Log::error('SSLCommerz credentials missing', [
-                                'store_id_set' => ! empty($this->config['store_id']),
-                                'store_password_set' => ! empty($this->config['store_password']),
-                            ]);
-
-                            return [
-                                'status' => 'FAILED',
-                                'failedreason' => 'Store ID or Store Password is missing. Please configure SSLCommerz credentials.',
-                            ];
-                        }
-
-                        // Add store_id and store_password to the data
-                        $requestData = array_merge($data, [
-                            'store_id' => $this->config['store_id'],
-                            'store_password' => $this->config['store_password'],
-                        ]);
-
-                        try {
-                            $response = Http::asForm()->post($apiUrl, $requestData);
-
-                            if ($response->successful()) {
-                                $result = $response->json();
-
-                                // If response is a string, try to parse it
-                                if (is_string($result)) {
-                                    parse_str($result, $result);
-                                }
-
-                                return $result;
-                            }
-
-                            // If request failed, return error response
-                            return [
-                                'status' => 'FAILED',
-                                'failedreason' => 'API request failed: '.$response->status(),
-                            ];
-                        } catch (\Exception $e) {
-                            Log::error('SSLCommerz direct API call failed', [
-                                'error' => $e->getMessage(),
-                                'data' => $data,
-                            ]);
-
-                            return [
-                                'status' => 'FAILED',
-                                'failedreason' => 'API call failed: '.$e->getMessage(),
-                            ];
-                        }
-                    }
-
-                    public function orderValidate($data)
-                    {
-                        Log::warning('SSLCommerz SDK not available, returning mock validation', $data);
-
-                        return [
-                            'element_0' => $data['tran_id'] ?? 'mock_transaction',
-                            'element_4' => 0,
-                            'element_5' => 'BDT',
-                            'element_7' => 'VALID',
-                        ];
-                    }
-
-                    public function refundTransaction($data)
-                    {
-                        Log::warning('SSLCommerz SDK not available, returning mock refund', $data);
-
-                        return [
-                            'status' => 'success',
-                            'trans_id' => 'refund_'.time(),
-                        ];
-                    }
-                };
-
-                Log::warning('SSLCommerz SDK not found, using mock implementation', [
-                    'required_class' => 'Raziul\\SslCommerz\\SslCommerz',
-                    'package' => 'raziul/sslcommerz-laravel',
-                ]);
-            }
-        } catch (\Exception $e) {
-            Log::error('Failed to initialize SSLCommerz', [
-                'error' => $e->getMessage(),
-                'config' => $this->config,
-            ]);
-
-            throw new \Exception('SSLCommerz initialization failed: '.$e->getMessage());
-        }
-    }
-
-    /**
-     * Get gateway name
-     */
     public function gatewayName(): string
     {
         return 'sslcommerz';
     }
 
-    /**
-     * Process payment
-     */
-    public function pay(PaymentRequest $paymentRequest): PaymentResponse
+    public function pay(PaymentRequest $request): PaymentResponse
     {
-        try {
+        $currency = strtoupper($request->getCurrency() ?: 'BDT');
 
-            // Validate currency
-            if (! $this->supportsCurrency($paymentRequest->currency)) {
-                throw new \InvalidArgumentException("Currency {$paymentRequest->currency} is not supported by SSLCommerz");
+        if (!in_array($currency, $this->supportedCurrencies, true)) {
+            throw new PaymentException("Currency {$currency} is not supported by SSLCommerz");
+        }
+
+        $tranId = $request->getTransactionId();
+        if (!$tranId) {
+            throw new PaymentException('SSLCommerz requires an order/transaction id (tran_id)');
+        }
+
+        $email = $request->getEmail();
+        if (!$email) {
+            throw new PaymentException('SSLCommerz requires a customer email');
+        }
+
+        $successUrl = $request->getReturnUrl() ?? $this->getModeConfig('success_url');
+        $failUrl = $this->getModeConfig('fail_url') ?? $request->getCancelUrl() ?? $successUrl;
+        $cancelUrl = $request->getCancelUrl() ?? $this->getModeConfig('cancel_url') ?? $failUrl;
+
+        if (!$successUrl || !$failUrl || !$cancelUrl) {
+            throw new PaymentException('SSLCommerz requires return (success), fail and cancel URLs');
+        }
+
+        $customer = $request->getCustomer() ?? [];
+        $metadata = $request->getMetadata();
+
+        $data = [
+            'store_id' => $this->requireModeConfig('store_id'),
+            'store_passwd' => $this->requireModeConfig('store_password'),
+            'total_amount' => number_format($request->getAmount(), 2, '.', ''),
+            'currency' => $currency,
+            'tran_id' => $tranId,
+            'success_url' => $successUrl,
+            'fail_url' => $failUrl,
+            'cancel_url' => $cancelUrl,
+            'ipn_url' => $request->getNotifyUrl() ?? $this->getModeConfig('ipn_url'),
+            'cus_name' => $customer['name'] ?? 'Customer',
+            'cus_email' => $email,
+            'cus_phone' => $customer['phone'] ?? $metadata['phone'] ?? '',
+            'cus_add1' => $customer['address'] ?? 'N/A',
+            'cus_city' => $customer['city'] ?? 'Dhaka',
+            'cus_postcode' => $customer['postal_code'] ?? '1000',
+            'cus_country' => $customer['country'] ?? 'Bangladesh',
+            'shipping_method' => 'NO',
+            'num_of_item' => 1,
+            'product_name' => $request->getDescription() ?? 'Payment',
+            'product_category' => $metadata['category'] ?? 'General',
+            'product_profile' => $metadata['product_profile'] ?? 'general',
+        ];
+
+        if (!empty($metadata['multi_card_name'])) {
+            $data['multi_card_name'] = $metadata['multi_card_name'];
+        }
+
+        foreach (['value_a', 'value_b', 'value_c', 'value_d'] as $field) {
+            if (isset($metadata[$field])) {
+                $data[$field] = (string) $metadata[$field];
             }
+        }
 
-            // Validate required fields
-            if (empty($paymentRequest->email)) {
-                throw new \InvalidArgumentException('Customer email is required for SSLCommerz payment');
-            }
+        $data = array_filter($data, fn ($v) => $v !== null && $v !== '');
 
-            if (empty($paymentRequest->transaction_id)) {
-                throw new \InvalidArgumentException('Transaction ID is required for SSLCommerz payment');
-            }
+        $response = Http::asForm()->timeout(30)->post($this->baseUrl() . '/gwprocess/v4/api.php', $data);
+        $result = $response->json() ?? [];
 
-            // Get URLs - use return_url for success, cancel_url for cancel, notify_url for IPN
-            $successUrl = $paymentRequest->returnUrl ?? $this->config['success_url'];
-            $failUrl = $paymentRequest->cancelUrl ?? $this->config['fail_url'];
-            $cancelUrl = $paymentRequest->cancelUrl ?? $this->config['cancel_url'];
-            $ipnUrl = $paymentRequest->notifyUrl ?? $this->config['ipn_url'];
-
-            // Validate URLs are set
-            if (empty($successUrl) || empty($failUrl) || empty($cancelUrl)) {
-                throw new \InvalidArgumentException('Success, fail, and cancel URLs are required for SSLCommerz payment');
-            }
-
-            // Prepare payment data with all required fields
-            $paymentData = [
-                'total_amount' => (float) $paymentRequest->amount,
-                'currency' => strtoupper($paymentRequest->currency),
-                'tran_id' => $paymentRequest->transaction_id ?? $paymentRequest->orderId,
-                'success_url' => $successUrl,
-                'fail_url' => $failUrl,
-                'cancel_url' => $cancelUrl,
-                'ipn_url' => $ipnUrl,
-                'cus_name' => $paymentRequest->customer['name'] ?? 'Guest User',
-                'cus_email' => $paymentRequest->email,
-                'cus_phone' => $this->sanitizePhone($paymentRequest->customer['phone'] ?? '01700000000'),
-                'cus_add1' => $this->sanitizeAddress($paymentRequest->customer['address'] ?? 'N/A'),
-                'cus_city' => $paymentRequest->customer['city'] ?? 'Dhaka',
-                'cus_country' => $paymentRequest->customer['country'] ?? 'Bangladesh',
-                'cus_postcode' => $paymentRequest->customer['postal_code'] ?? '1000',
-                'shipping_method' => 'NO',
-                'multi_card_name' => $this->getPaymentMethods([
-                    'payment_options' => $paymentRequest->metadata['payment_options'] ?? 'all',
-                ]),
-                'product_name' => $paymentRequest->description ?? 'Payment',
-                'product_category' => $paymentRequest->metadata['category'] ?? 'General',
-                'product_profile' => 'general',
-            ];
-
-            // Add custom metadata if provided
-            if (! empty($paymentRequest->metadata)) {
-                $paymentData['value_a'] = json_encode($paymentRequest->metadata);
-            }
-
-            // Create payment session
-            $response = $this->sslcommerz->makePayment($paymentData, 'hosted');
-
-            if (isset($response['status']) && $response['status'] === 'SUCCESS') {
-                return PaymentResponse::success([
-                    'transaction_id' => $paymentRequest->transaction_id,
-                    'gateway_transaction_id' => $response['sessionkey'] ?? null,
-                    'payment_url' => $response['GatewayPageURL'] ?? null,
-                    'session_key' => $response['sessionkey'] ?? null,
-                    'redirect_url' => $response['GatewayPageURL'] ?? null,
-                    'message' => 'Payment session created successfully',
-                    'data' => $response,
-                ]);
-            }
-
-            throw new \Exception($response['failedreason'] ?? 'Failed to create payment session');
-        } catch (\Exception $e) {
-            Log::error('SSLCommerz payment error: '.$e->getMessage(), [
-                'transaction_id' => $paymentRequest->transaction_id ?? null,
-                'amount' => $paymentRequest->amount ?? null,
-                'error' => $e->getMessage(),
+        if (($result['status'] ?? null) !== 'SUCCESS' || empty($result['GatewayPageURL'])) {
+            $this->log('error', 'SSLCommerz session creation failed', [
+                'tran_id' => $tranId,
+                'reason' => $result['failedreason'] ?? $response->status(),
             ]);
 
-            return PaymentResponse::error($e->getMessage(), 'PAYMENT_FAILED');
+            throw new PaymentException('SSLCommerz: ' . ($result['failedreason'] ?? 'failed to create payment session'));
         }
+
+        return PaymentResponse::redirect($result['GatewayPageURL'], [
+            'transaction_id' => $tranId,
+            'gateway_reference' => $result['sessionkey'] ?? null,
+            'session_key' => $result['sessionkey'] ?? null,
+            'message' => 'Redirect to SSLCommerz payment page',
+        ]);
     }
 
     /**
-     * Verify payment
+     * Confirm a payment with the SSLCommerz validation API.
+     *
+     * Uses val_id when present (success/IPN POST), otherwise looks the
+     * transaction up by tran_id.
      */
     public function verify(array $payload): PaymentResponse
     {
-        try {
-            // Extract transaction ID from payload
-            $transactionId = $payload['tran_id'] ?? $payload['transaction_id'] ?? null;
+        $valId = $payload['val_id'] ?? null;
+        $tranId = $payload['tran_id'] ?? $payload['transaction_id'] ?? null;
 
-            if (! $transactionId) {
-                return PaymentResponse::error('Transaction ID is required for verification', 'MISSING_TRANSACTION_ID');
+        if ($valId) {
+            $result = $this->validator('/validator/api/validationserverAPI.php', ['val_id' => $valId]);
+
+            if ($tranId !== null && ($result['tran_id'] ?? null) !== $tranId) {
+                throw new PaymentException('SSLCommerz validation tran_id does not match the callback');
             }
-
-            // SSLCommerz transaction validation
-            $response = $this->sslcommerz->orderValidate([
-                'tran_id' => $transactionId,
-                'amount' => null, // Will be verified from response
-                'currency' => null, // Will be verified from response
-                'store_password' => $this->config['store_password'],
-            ]);
-
-            if ($response && isset($response['element_0']) && $response['element_0'] === $transactionId) {
-                $status = $response['element_7'] ?? null;
-                $successStatuses = ['success', 'completed', 'valid', 'validated'];
-                $isSuccess = in_array(strtolower($status), $successStatuses);
-
-                return new PaymentResponse(
-                    success: $isSuccess,
-                    transactionId: $transactionId,
-                    gatewayTransactionId: $response['element_0'] ?? null,
-                    status: strtolower($status),
-                    amount: (float) ($response['element_4'] ?? 0),
-                    currency: $response['element_5'] ?? null,
-                    message: $isSuccess ? 'Payment verified successfully' : 'Payment verification failed',
-                    data: array_merge([
-                        'payment_method' => $response['element_2'] ?? null,
-                        'card_type' => $response['element_15'] ?? null,
-                        'card_issuer' => $response['element_16'] ?? null,
-                        'card_brand' => $response['element_17'] ?? null,
-                        'card_no' => $response['element_14'] ?? null,
-                        'store_amount' => (float) ($response['element_9'] ?? 0),
-                        'bank_tran_id' => $response['element_12'] ?? null,
-                        'currency_amount' => (float) ($response['element_6'] ?? 0),
-                        'currency_rate' => (float) ($response['element_8'] ?? 0),
-                        'base_fair' => (float) ($response['element_10'] ?? 0),
-                        'risk_level' => $response['element_18'] ?? null,
-                        'risk_title' => $response['element_19'] ?? null,
-                        'validated_on' => $response['element_13'] ?? null,
-                        'gw_version' => $response['element_20'] ?? null,
-                    ], $response)
-                );
-            }
-
-            return PaymentResponse::error('Transaction not found or invalid', 'TRANSACTION_NOT_FOUND');
-
-        } catch (\Exception $e) {
-            Log::error('SSLCommerz verification error: '.$e->getMessage(), [
-                'payload' => $payload,
-                'error' => $e->getMessage(),
-            ]);
-
-            return PaymentResponse::error($e->getMessage(), 'VERIFICATION_FAILED');
+        } elseif ($tranId) {
+            $result = $this->findValidTransaction($tranId);
+        } else {
+            throw new PaymentException('SSLCommerz verification needs val_id or tran_id');
         }
+
+        return $this->toResponse($result ?? [], $tranId);
     }
 
     /**
-     * Process refund
+     * Handle an SSLCommerz IPN: checks verify_sign, then validates val_id.
+     */
+    public function handleWebhook(array $payload, string $rawBody, array $headers): PaymentResponse
+    {
+        if (!$this->validIpnHash($payload)) {
+            throw new InvalidSignatureException('Invalid SSLCommerz IPN signature', gateway: 'sslcommerz');
+        }
+
+        return $this->verify($payload);
+    }
+
+    /**
+     * Refund. $transactionId may be the bank_tran_id or your tran_id (the
+     * bank_tran_id is then looked up). Refunds are processed asynchronously.
      */
     public function refund(string $transactionId, float $amount): bool
     {
-        try {
-            // SSLCommerz requires bank transaction ID for refunds
-            // We need to get this from the original transaction
-            // In a real implementation, you would store this during payment
+        $bankTranId = $transactionId;
 
-            // For now, we'll use the transaction ID as bank transaction ID
-            // This may need to be adjusted based on your implementation
-            $refundData = [
-                'bank_tran_id' => $transactionId, // This might need to be stored separately during payment
-                'refund_amount' => $amount,
-                'refund_remarks' => 'Refund requested',
-                'store_id' => $this->config['store_id'],
-                'store_password' => $this->config['store_password'],
-            ];
-
-            if (! $refundData['bank_tran_id']) {
-                throw new \Exception('Bank transaction ID is required for refund');
+        $found = $this->findValidTransaction($transactionId);
+        if ($found && !empty($found['bank_tran_id'])) {
+            $bankTranId = $found['bank_tran_id'];
+            if ($amount <= 0) {
+                $amount = (float) ($found['amount'] ?? 0);
             }
-
-            $response = $this->sslcommerz->refundTransaction($refundData);
-
-            if (isset($response['status']) && $response['status'] === 'success') {
-                return true;
-            }
-
-            throw new \Exception($response['error_message'] ?? 'Refund failed');
-        } catch (\Exception $e) {
-            Log::error('SSLCommerz refund error: '.$e->getMessage(), [
-                'transaction_id' => $transactionId,
-                'amount' => $amount,
-                'error' => $e->getMessage(),
-            ]);
-
-            return false;
         }
+
+        if ($amount <= 0) {
+            throw new PaymentException('SSLCommerz refund needs a positive amount');
+        }
+
+        $result = $this->validator('/validator/api/merchantTransIDvalidationAPI.php', [
+            'bank_tran_id' => $bankTranId,
+            'refund_amount' => number_format($amount, 2, '.', ''),
+            'refund_remarks' => 'Refund requested',
+        ]);
+
+        $this->log('info', 'SSLCommerz refund requested', [
+            'bank_tran_id' => $bankTranId,
+            'amount' => $amount,
+            'status' => $result['status'] ?? null,
+            'refund_ref_id' => $result['refund_ref_id'] ?? null,
+        ]);
+
+        if (($result['APIConnect'] ?? null) === 'DONE' && in_array($result['status'] ?? null, ['success', 'processing'], true)) {
+            return true;
+        }
+
+        throw new PaymentException('SSLCommerz refund failed: ' . ($result['errorReason'] ?? $result['status'] ?? 'unknown error'));
     }
 
-    /**
-     * Check if refunds are supported
-     */
     public function supportsRefund(): bool
     {
         return true;
     }
 
     /**
-     * Process webhook
+     * Look up a transaction by tran_id and return its VALID/VALIDATED entry.
      */
-    public function processWebhook(array $payload): array
+    public function findValidTransaction(string $tranId): ?array
     {
-        try {
-            // Verify the webhook is from SSLCommerz
-            if (! $this->validateWebhook($payload)) {
-                throw new \Exception('Invalid webhook signature');
-            }
+        $result = $this->validator('/validator/api/merchantTransIDvalidationAPI.php', ['tran_id' => $tranId]);
 
-            $tranId = $payload['tran_id'] ?? null;
-            $amount = $payload['amount'] ?? null;
-            $currency = $payload['currency'] ?? null;
-
-            // Validate the transaction
-            $validationData = [
-                'val_id' => $payload['val_id'] ?? null,
-                'store_id' => $this->config['store_id'],
-                'store_password' => $this->config['store_password'],
-            ];
-
-            $response = Http::asForm()->post(
-                $this->config['test_mode']
-                    ? 'https://sandbox.sslcommerz.com/validator/api/validationserverAPI.php'
-                    : 'https://securepay.sslcommerz.com/validator/api/validationserverAPI.php',
-                $validationData
-            );
-
-            if (! $response->successful()) {
-                throw new \Exception('Webhook validation failed');
-            }
-
-            $result = $response->json();
-
-            return [
-                'success' => true,
-                'event_type' => $this->getEventType($payload),
-                'transaction_id' => $tranId,
-                'status' => $result['status'] ?? 'unknown',
-                'amount' => $amount ? (float) $amount : null,
-                'currency' => $currency,
-                'payment_method' => $payload['card_type'] ?? null,
-                'data' => [
-                    'webhook' => $payload,
-                    'validation' => $result,
-                ],
-            ];
-
-        } catch (\Exception $e) {
-            Log::error('SSLCommerz webhook error: '.$e->getMessage(), [
-                'payload' => $payload,
-                'error' => $e->getMessage(),
-            ]);
-
-            return [
-                'success' => false,
-                'error' => [
-                    'message' => $e->getMessage(),
-                    'code' => 'WEBHOOK_FAILED',
-                ],
-            ];
-        }
-    }
-
-    /**
-     * Validate webhook
-     */
-    protected function validateWebhook(array $payload): bool
-    {
-        // Check required fields
-        $requiredFields = ['tran_id', 'val_id', 'amount', 'currency'];
-        foreach ($requiredFields as $field) {
-            if (! isset($payload[$field])) {
-                return false;
+        foreach ($result['element'] ?? [] as $element) {
+            if (in_array($element['status'] ?? null, ['VALID', 'VALIDATED'], true)) {
+                return $element;
             }
         }
 
-        return true;
+        return $result['element'][0] ?? null;
     }
 
-    /**
-     * Get event type from webhook payload
-     */
-    protected function getEventType(array $payload): string
-    {
-        $status = $payload['status'] ?? '';
-
-        switch ($status) {
-            case 'VALID':
-            case 'VALIDATED':
-                return 'payment.success';
-            case 'FAILED':
-                return 'payment.failed';
-            case 'CANCELLED':
-                return 'payment.cancelled';
-            default:
-                return 'payment.unknown';
-        }
-    }
-
-    /**
-     * Get payment methods
-     */
-    protected function getPaymentMethods(array $data): ?string
-    {
-        $methods = $data['payment_options'] ?? 'all';
-
-        if ($methods === 'all') {
-            return null;
-        }
-
-        $availableMethods = [
-            'amex' => 'amex',
-            'visa' => 'visa',
-            'mastercard' => 'mastercard',
-            'brac_visa' => 'brac_visa',
-            'city_visa' => 'city_visa',
-            'dutch_bangla_visa' => 'dutch_bangla_visa',
-            'ebl_visa' => 'ebl_visa',
-            'dbbl_master' => 'dbbl_master',
-            'brac_master' => 'brac_master',
-            'city_master' => 'city_master',
-            'ebl_master' => 'ebl_master',
-            'mtbl_visa' => 'mtbl_visa',
-            'city_amex' => 'city_amex',
-            'brac_amex' => 'brac_amex',
-            'dbbl_amex' => 'dbbl_amex',
-            'mobile_banking' => 'mobilebank',
-            'internet_banking' => 'internetbank',
-            'others' => 'others',
-        ];
-
-        if (is_array($methods)) {
-            $selectedMethods = [];
-            foreach ($methods as $method) {
-                if (isset($availableMethods[$method])) {
-                    $selectedMethods[] = $availableMethods[$method];
-                }
-            }
-
-            return ! empty($selectedMethods) ? implode(',', $selectedMethods) : null;
-        }
-
-        return isset($availableMethods[$methods]) ? $availableMethods[$methods] : null;
-    }
-
-    /**
-     * Create subscription (SSLCommerz doesn't have native subscriptions, so we use recurring payments)
-     */
-    public function createSubscription(array $data): array
-    {
-        try {
-            // SSLCommerz supports recurring payments through payment links
-            $paymentData = [
-                'total_amount' => $data['amount'],
-                'currency' => $data['currency'] ?? 'BDT',
-                'tran_id' => $data['transaction_id'] ?? 'SUB_'.time(),
-                'success_url' => $data['success_url'] ?? $this->config['success_url'],
-                'fail_url' => $data['fail_url'] ?? $this->config['fail_url'],
-                'cancel_url' => $data['cancel_url'] ?? $this->config['cancel_url'],
-                'ipn_url' => $this->config['ipn_url'],
-                'cus_name' => $data['customer']['name'] ?? 'Guest User',
-                'cus_email' => $data['customer']['email'] ?? '',
-                'cus_phone' => $data['customer']['phone'] ?? '',
-                'product_name' => $data['description'] ?? 'Recurring Payment',
-                'product_category' => 'Subscription',
-                'product_profile' => 'general',
-                'recur_amount' => $data['amount'],
-                'recur_interval' => $data['interval'] ?? 'month',
-                'recur_times' => $data['times'] ?? 12,
-            ];
-
-            $response = $this->sslcommerz->makePayment($paymentData, 'hosted');
-
-            if (isset($response['status']) && $response['status'] === 'SUCCESS') {
-                return [
-                    'success' => true,
-                    'subscription_id' => $paymentData['tran_id'],
-                    'gateway_transaction_id' => $response['sessionkey'],
-                    'payment_url' => $response['GatewayPageURL'],
-                    'amount' => $data['amount'],
-                    'currency' => $data['currency'] ?? 'BDT',
-                    'interval' => $data['interval'] ?? 'month',
-                    'times' => $data['times'] ?? 12,
-                    'status' => 'created',
-                    'message' => 'Subscription created successfully',
-                    'data' => $response,
-                ];
-            }
-
-            throw new \Exception($response['failedreason'] ?? 'Failed to create subscription');
-        } catch (\Exception $e) {
-            Log::error('SSLCommerz subscription error: '.$e->getMessage(), [
-                'data' => $data,
-                'error' => $e->getMessage(),
-            ]);
-
-            return [
-                'success' => false,
-                'error' => [
-                    'message' => $e->getMessage(),
-                    'code' => 'SUBSCRIPTION_FAILED',
-                ],
-            ];
-        }
-    }
-
-    /**
-     * Cancel subscription
-     */
-    public function cancelSubscription(string $subscriptionId): array
-    {
-        // SSLCommerz doesn't have native subscription management
-        // This would need to be handled at the application level
-        return [
-            'success' => true,
-            'subscription_id' => $subscriptionId,
-            'status' => 'cancelled',
-            'message' => 'Subscription cancelled at application level',
-        ];
-    }
-
-    /**
-     * Create customer
-     */
-    public function createCustomer(array $data): array
-    {
-        // SSLCommerz doesn't have a separate customer creation API
-        // Customer information is sent with each payment request
-        return [
-            'success' => true,
-            'customer' => [
-                'name' => $data['name'],
-                'email' => $data['email'],
-                'phone' => $data['phone'] ?? null,
-                'address' => $data['address'] ?? null,
-            ],
-            'message' => 'Customer information noted for future payments',
-        ];
-    }
-
-    /**
-     * Create payment link
-     */
-    public function createPaymentLink(array $data): array
-    {
-        try {
-            $paymentData = [
-                'total_amount' => $data['amount'],
-                'currency' => $data['currency'] ?? 'BDT',
-                'tran_id' => $data['transaction_id'] ?? 'LINK_'.time(),
-                'success_url' => $data['redirect_url'] ?? $this->config['success_url'],
-                'fail_url' => $data['redirect_url'] ?? $this->config['fail_url'],
-                'cancel_url' => $data['redirect_url'] ?? $this->config['cancel_url'],
-                'ipn_url' => $this->config['ipn_url'],
-                'cus_name' => $data['customer']['name'] ?? 'Guest User',
-                'cus_email' => $data['customer']['email'] ?? '',
-                'cus_phone' => $data['customer']['phone'] ?? '',
-                'product_name' => $data['description'] ?? 'Payment Link',
-                'product_category' => 'Payment Link',
-                'product_profile' => 'general',
-            ];
-
-            $response = $this->sslcommerz->makePayment($paymentData, 'hosted');
-
-            if (isset($response['status']) && $response['status'] === 'SUCCESS') {
-                return [
-                    'success' => true,
-                    'link_id' => $paymentData['tran_id'],
-                    'payment_url' => $response['GatewayPageURL'],
-                    'amount' => $data['amount'],
-                    'currency' => $data['currency'] ?? 'BDT',
-                    'status' => 'active',
-                    'message' => 'Payment link created successfully',
-                    'data' => $response,
-                ];
-            }
-
-            throw new \Exception($response['failedreason'] ?? 'Failed to create payment link');
-        } catch (\Exception $e) {
-            Log::error('SSLCommerz payment link error: '.$e->getMessage(), [
-                'data' => $data,
-                'error' => $e->getMessage(),
-            ]);
-
-            return [
-                'success' => false,
-                'error' => [
-                    'message' => $e->getMessage(),
-                    'code' => 'PAYMENT_LINK_FAILED',
-                ],
-            ];
-        }
-    }
-
-    /**
-     * Get transaction status
-     */
-    public function getTransactionStatus(string $transactionId): array
-    {
-        return $this->verify($transactionId);
-    }
-
-    /**
-     * Check if currency is supported
-     */
-    protected function supportsCurrency(string $currency): bool
-    {
-        return in_array(strtoupper($currency), $this->supportedCurrencies);
-    }
-
-    /**
-     * Get supported currencies
-     */
     public function getSupportedCurrencies(): array
     {
         return $this->supportedCurrencies;
     }
 
     /**
-     * Get gateway configuration
+     * Verify the IPN verify_sign/verify_key hash.
      */
-    public function getGatewayConfig(): array
+    public function validIpnHash(array $payload): bool
     {
-        return [
-            'name' => $this->getGatewayName(),
-            'display_name' => 'SSLCommerz',
-            'currencies' => $this->getSupportedCurrencies(),
-            'supports_subscriptions' => true,
-            'supports_refunds' => true,
-            'supports_webhooks' => true,
-            'test_mode' => $this->config['test_mode'],
-            'store_id' => $this->config['store_id'] ? substr($this->config['store_id'], 0, 4).'...' : null,
-        ];
+        $sign = $payload['verify_sign'] ?? '';
+        $keys = $payload['verify_key'] ?? '';
+        $password = $this->getModeConfig('store_password');
+
+        if ($sign === '' || $keys === '' || !$password) {
+            return false;
+        }
+
+        $data = [];
+        foreach (explode(',', $keys) as $key) {
+            $data[$key] = $payload[$key] ?? '';
+        }
+        $data['store_passwd'] = md5($password);
+        ksort($data);
+
+        $string = '';
+        foreach ($data as $key => $value) {
+            $string .= $key . '=' . $value . '&';
+        }
+
+        return hash_equals(md5(rtrim($string, '&')), $sign);
     }
 
-    /**
-     * Get payment methods for a country
-     */
-    public function getPaymentMethodsForCountry(string $country): array
+    protected function toResponse(array $result, ?string $tranId): PaymentResponse
     {
-        $methods = [
-            'BD' => [
-                'visa' => 'Visa Card',
-                'mastercard' => 'Mastercard',
-                'amex' => 'American Express',
-                'mobile_banking' => 'Mobile Banking (bKash, Rocket, Nagad, etc.)',
-                'internet_banking' => 'Internet Banking',
-                'others' => 'Other Payment Methods',
+        $status = $result['status'] ?? 'UNKNOWN';
+        $success = in_array($status, ['VALID', 'VALIDATED'], true);
+
+        // currency_type/currency_amount are what the customer was charged in;
+        // amount/currency are the BDT settlement values
+        $currency = $result['currency_type'] ?? $result['currency'] ?? null;
+        $amount = $result['currency_amount'] ?? $result['amount'] ?? null;
+
+        return new PaymentResponse(
+            success: $success,
+            transactionId: $result['tran_id'] ?? $tranId,
+            message: $success ? 'Payment validated' : "SSLCommerz status: {$status}",
+            status: $success ? 'completed' : strtolower($status),
+            data: [
+                'val_id' => $result['val_id'] ?? null,
+                'bank_tran_id' => $result['bank_tran_id'] ?? null,
+                'card_type' => $result['card_type'] ?? null,
+                'store_amount' => $result['store_amount'] ?? null,
+                'risk_level' => $result['risk_level'] ?? null,
+                'risk_title' => $result['risk_title'] ?? null,
+                'validation' => $result,
             ],
-            'OTHER' => [
-                'visa' => 'Visa Card',
-                'mastercard' => 'Mastercard',
-                'amex' => 'American Express',
-                'internet_banking' => 'Internet Banking',
-                'others' => 'Other Payment Methods',
-            ],
+            gatewayReference: $result['bank_tran_id'] ?? null,
+            amount: $amount !== null ? (float) $amount : null,
+            currency: $currency
+        );
+    }
+
+    protected function validator(string $path, array $query): array
+    {
+        $query += [
+            'store_id' => $this->requireModeConfig('store_id'),
+            'store_passwd' => $this->requireModeConfig('store_password'),
+            'format' => 'json',
+            'v' => 1,
         ];
 
-        return $methods[$country] ?? $methods['OTHER'];
+        $response = Http::timeout(30)->get($this->baseUrl() . $path, $query);
+
+        if (!$response->successful()) {
+            throw new PaymentException('SSLCommerz API request failed with HTTP ' . $response->status());
+        }
+
+        return $response->json() ?? [];
     }
 
-    /**
-     * Validate transaction data
-     */
-    protected function validateTransactionData(array $data): bool
+    protected function baseUrl(): string
     {
-        $required = ['amount', 'currency', 'email'];
-
-        foreach ($required as $field) {
-            if (! isset($data[$field]) || empty($data[$field])) {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    /**
-     * Sanitize phone number for SSLCommerz
-     */
-    protected function sanitizePhone(?string $phone): string
-    {
-        if (empty($phone) || $phone === 'walk-in' || ! preg_match('/^[0-9+\-\s()]+$/', $phone)) {
-            return '01700000000';
-        }
-
-        // Remove any non-numeric characters except + and -
-        $phone = preg_replace('/[^0-9+\-]/', '', $phone);
-
-        // Ensure it's at least 10 digits
-        if (strlen(preg_replace('/[^0-9]/', '', $phone)) < 10) {
-            return '01700000000';
-        }
-
-        return $phone;
-    }
-
-    /**
-     * Sanitize address for SSLCommerz
-     */
-    protected function sanitizeAddress(?string $address): string
-    {
-        if (empty($address) || trim($address) === '') {
-            return 'N/A';
-        }
-
-        // SSLCommerz requires address to be at least 3 characters
-        $address = trim($address);
-        if (strlen($address) < 3) {
-            return 'N/A';
-        }
-
-        return $address;
+        return $this->isSandbox() ? 'https://sandbox.sslcommerz.com' : 'https://securepay.sslcommerz.com';
     }
 }

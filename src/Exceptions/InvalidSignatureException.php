@@ -6,12 +6,13 @@ use Exception;
 
 class InvalidSignatureException extends PaymentException
 {
-    public function __construct(string $message = "Invalid webhook signature", int $code = 401, ?\Throwable $previous = null)
+    public function __construct(string $message = "Invalid webhook signature", int $code = 401, ?\Throwable $previous = null, ?string $gateway = null)
     {
         parent::__construct(
             message: $message,
             code: $code,
-            previous: $previous
+            previous: $previous,
+            gateway: $gateway
         );
     }
 

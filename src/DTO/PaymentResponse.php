@@ -16,7 +16,8 @@ class PaymentResponse
         public readonly ?string $gatewayReference = null,
         public readonly ?float $amount = null,
         public readonly ?string $currency = null,
-        public readonly array $meta = []
+        public readonly array $meta = [],
+        public readonly string|int|null $errorCode = null
     ) {}
 
     /**
@@ -62,7 +63,8 @@ class PaymentResponse
             message: $message,
             status: Arr::get($data, 'status', 'error'),
             data: array_merge($data, ['error_code' => $code]),
-            meta: Arr::get($data, 'meta', [])
+            meta: Arr::get($data, 'meta', []),
+            errorCode: $code
         );
     }
 
@@ -100,6 +102,7 @@ class PaymentResponse
             'amount' => $this->amount,
             'currency' => $this->currency,
             'meta' => $this->meta,
+            'error_code' => $this->errorCode,
         ];
     }
 
@@ -209,6 +212,34 @@ class PaymentResponse
     public function getGatewayReference(): ?string
     {
         return $this->gatewayReference;
+    }
+
+    /**
+     * Check that the gateway-confirmed amount/currency match what the order expects.
+     *
+     * Always call this before marking an order paid: a successful status alone
+     * does not prove the customer paid the full amount.
+     */
+    public function matchesAmount(float $expectedAmount, ?string $expectedCurrency = null): bool
+    {
+        if (! $this->success || $this->amount === null) {
+            return false;
+        }
+
+        if ($expectedCurrency !== null && $this->currency !== null
+            && strtoupper($expectedCurrency) !== strtoupper($this->currency)) {
+            return false;
+        }
+
+        return abs($this->amount - $expectedAmount) < 0.005;
+    }
+
+    /**
+     * Get error code
+     */
+    public function getErrorCode(): string|int|null
+    {
+        return $this->errorCode;
     }
 
     /**

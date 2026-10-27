@@ -2,98 +2,75 @@
 
 namespace Mdiqbal\LaravelPayments\Tests\Feature;
 
-use Mdiqbal\LaravelPayments\Tests\TestCase;
-use Mdiqbal\LaravelPayments\Facades\Payment;
+use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Http;
 use Mdiqbal\LaravelPayments\DTO\PaymentRequest;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Mdiqbal\LaravelPayments\DTO\PaymentResponse;
+use Mdiqbal\LaravelPayments\Events\PaymentFailed;
+use Mdiqbal\LaravelPayments\Events\PaymentInitiated;
+use Mdiqbal\LaravelPayments\Events\PaymentSucceeded;
+use Mdiqbal\LaravelPayments\Exceptions\PaymentException;
+use Mdiqbal\LaravelPayments\Facades\Payment;
+use Mdiqbal\LaravelPayments\Tests\TestCase;
 
 class GatewayIntegrationTest extends TestCase
 {
-    use RefreshDatabase;
-
-    /** @test */
-    public function it_can_process_payment_with_multiple_gateways()
+    private function request(): PaymentRequest
     {
-        $request = new PaymentRequest(
-            orderId: 'TEST_ORDER_001',
+        return new PaymentRequest(
             amount: 50.00,
-            currency: 'USD',
-            customerEmail: 'test@example.com',
-            callbackUrl: 'https://example.com/callback'
+            currency: 'NGN',
+            orderId: 'TEST_ORDER_001',
+            email: 'test@example.com',
+            returnUrl: 'https://example.com/callback'
         );
-
-        // Test with Stripe
-        $stripeResponse = Payment::pay('stripe', $request);
-        $this->assertNotNull($stripeResponse);
-        $this->assertInstanceOf(\Mdiqbal\LaravelPayments\DTO\PaymentResponse::class, $stripeResponse);
-
-        // Test with PayPal
-        $paypalResponse = Payment::pay('paypal', $request);
-        $this->assertNotNull($paypalResponse);
-        $this->assertInstanceOf(\Mdiqbal\LaravelPayments\DTO\PaymentResponse::class, $paypalResponse);
     }
 
     /** @test */
-    public function it_can_verify_webhook_payloads()
+    public function payment_context_fires_events()
     {
-        // Stripe webhook payload
-        $stripePayload = [
-            'id' => 'evt_test',
-            'type' => 'payment_intent.succeeded',
-            'data' => [
-                'object' => [
-                    'id' => 'pi_test',
-                    'status' => 'succeeded',
-                    'amount' => 10000,
-                    'currency' => 'usd'
-                ]
-            ]
-        ];
+        Event::fake([PaymentInitiated::class, PaymentSucceeded::class, PaymentFailed::class]);
+        Http::fake(['api.paystack.co/*' => Http::response(['status' => true, 'data' => [
+            'authorization_url' => 'https://checkout.paystack.com/x', 'access_code' => 'x', 'reference' => 'TEST_ORDER_001',
+        ]])]);
 
-        $response = Payment::verify('stripe', $stripePayload);
-        $this->assertInstanceOf(\Mdiqbal\LaravelPayments\DTO\PaymentResponse::class, $response);
+        $response = Payment::context()->using('paystack')->with($this->request())->execute();
 
-        // PayPal webhook payload
-        $paypalPayload = [
-            'id' => 'WH-123456789',
-            'event_type' => 'PAYMENT.CAPTURE.COMPLETED',
-            'resource' => [
-                'id' => 'PAY-123',
-                'status' => 'COMPLETED'
-            ]
-        ];
-
-        $response = Payment::verify('paypal', $paypalPayload);
-        $this->assertInstanceOf(\Mdiqbal\LaravelPayments\DTO\PaymentResponse::class, $response);
+        $this->assertInstanceOf(PaymentResponse::class, $response);
+        Event::assertDispatched(PaymentInitiated::class);
+        Event::assertDispatched(PaymentSucceeded::class);
     }
 
     /** @test */
-    public function it_can_handle_payment_context()
+    public function payment_context_fires_failed_event_on_error()
     {
-        $request = new PaymentRequest(
-            orderId: 'CONTEXT_TEST',
-            amount: 75.00,
-            currency: 'EUR',
-            customerEmail: 'context@example.com',
-            callbackUrl: 'https://example.com/callback'
-        );
+        Event::fake([PaymentFailed::class]);
+        Http::fake(['api.paystack.co/*' => Http::response(['status' => false, 'message' => 'Invalid key'], 401)]);
 
-        $response = Payment::context()
-            ->using('stripe')
-            ->with($request)
-            ->execute();
-
-        $this->assertInstanceOf(\Mdiqbal\LaravelPayments\DTO\PaymentResponse::class, $response);
+        try {
+            Payment::context()->using('paystack')->with($this->request())->execute();
+            $this->fail('Expected PaymentException');
+        } catch (PaymentException $e) {
+            Event::assertDispatched(PaymentFailed::class);
+        }
     }
 
     /** @test */
-    public function it_can_process_refunds()
+    public function webhook_route_rejects_unsigned_requests()
     {
-        $transactionId = 'TXN_REFUND_TEST';
-        $amount = 25.00;
+        $this->postJson('/payments/webhook/stripe', ['type' => 'payment_intent.succeeded'])->assertStatus(400);
+        $this->postJson('/payments/webhook/stripe', ['type' => 'payment_intent.succeeded'], ['X-Signature' => 'x'])->assertStatus(400);
+        $this->postJson('/payments/webhook/unknown', [])->assertNotFound();
+    }
 
-        $result = Payment::refund('stripe', $transactionId, $amount);
-        $this->assertIsBool($result);
+    /** @test */
+    public function refund_is_rejected_when_provider_fails()
+    {
+        Http::fake(['api.paystack.co/*' => Http::response(['status' => false, 'message' => 'Transaction not found'], 404)]);
+
+        $this->expectException(PaymentException::class);
+
+        Payment::refund('paystack', 'TXN_REFUND_TEST', 25.00);
     }
 
     /** @test */
@@ -101,5 +78,6 @@ class GatewayIntegrationTest extends TestCase
     {
         $this->assertTrue(Payment::supportsRefund('stripe'));
         $this->assertTrue(Payment::supportsRefund('paypal'));
+        $this->assertFalse(Payment::supportsRefund('telr'));
     }
 }
