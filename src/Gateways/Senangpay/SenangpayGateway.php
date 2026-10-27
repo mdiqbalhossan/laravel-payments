@@ -174,7 +174,7 @@ class SenangpayGateway extends AbstractGateway
             return new PaymentResponse(
                 success: $isSuccess,
                 transactionId: $transactionId,
-                gatewayTransactionId: null,
+                gatewayReference: null,
                 status: strtolower($queryData['status']),
                 amount: null,
                 currency: 'MYR',

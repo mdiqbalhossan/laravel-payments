@@ -311,7 +311,7 @@ class SslcommerzGateway extends AbstractGateway
                 return new PaymentResponse(
                     success: $isSuccess,
                     transactionId: $transactionId,
-                    gatewayTransactionId: $response['element_0'] ?? null,
+                    gatewayReference: $response['element_0'] ?? null,
                     status: strtolower($status),
                     amount: (float) ($response['element_4'] ?? 0),
                     currency: $response['element_5'] ?? null,

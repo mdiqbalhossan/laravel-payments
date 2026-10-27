@@ -278,7 +278,7 @@ class BkashGateway extends AbstractGateway
                 return new PaymentResponse(
                     success: $isSuccess,
                     transactionId: $transactionId,
-                    gatewayTransactionId: $paymentId,
+                    gatewayReference: $paymentId,
                     status: strtolower($response['transactionStatus']),
                     amount: (float) ($response['amount'] ?? 0),
                     currency: 'BDT',

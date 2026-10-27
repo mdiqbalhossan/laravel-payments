@@ -1,6 +1,6 @@
 <?php
 
-namespace Mdiqbal\LaravelPayments\Gateways\Phonepe;
+namespace Mdiqbal\LaravelPayments\Gateways\PhonePe;
 
 use Exception;
 use Illuminate\Support\Facades\Http;

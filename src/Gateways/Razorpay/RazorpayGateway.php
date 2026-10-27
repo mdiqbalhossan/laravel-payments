@@ -5,6 +5,7 @@ namespace Mdiqbal\LaravelPayments\Gateways\Razorpay;
 use Mdiqbal\LaravelPayments\Core\AbstractGateway;
 use Mdiqbal\LaravelPayments\DTO\PaymentRequest;
 use Mdiqbal\LaravelPayments\DTO\PaymentResponse;
+use Mdiqbal\LaravelPayments\Exceptions\InvalidSignatureException;
 use Mdiqbal\LaravelPayments\Exceptions\PaymentException;
 use Razorpay\Api\Api;
 use Razorpay\Api\Order;
@@ -52,7 +53,7 @@ class RazorpayGateway extends AbstractGateway
             return PaymentResponse::success([
                 'transaction_id' => $order->id,
                 'razorpay_order_id' => $order->id,
-                'amount' => $order->amount / 100, // Convert from paise to rupees
+                'amount' => $this->fromMinorUnits($order->amount, $order->currency),
                 'currency' => $order->currency,
                 'receipt' => $order->receipt,
                 'status' => $order->status,
@@ -77,15 +78,28 @@ class RazorpayGateway extends AbstractGateway
             $orderId = $payload['razorpay_order_id'] ?? '';
             $paymentId = $payload['razorpay_payment_id'] ?? '';
 
-            if (!$this->verifySignature($orderId, $paymentId, $signature)) {
-                throw new PaymentException('Invalid Razorpay signature');
+            if (!$orderId || !$paymentId || !$this->verifySignature($orderId, $paymentId, $signature)) {
+                throw new InvalidSignatureException('Invalid Razorpay signature', gateway: 'razorpay');
             }
 
             // Fetch payment details from Razorpay
             $payment = $this->getRazorpay()->payment->fetch($paymentId);
 
+            if ($payment->order_id !== $orderId) {
+                throw new PaymentException('Razorpay payment does not belong to this order');
+            }
+
             if ($payment->status !== 'captured') {
-                throw new PaymentException('Payment not captured');
+                return new PaymentResponse(
+                    success: false,
+                    transactionId: $paymentId,
+                    status: $payment->status === 'authorized' ? 'pending' : $payment->status,
+                    message: "Payment is {$payment->status}, not captured",
+                    data: ['order_id' => $orderId, 'payment_id' => $paymentId],
+                    gatewayReference: $orderId,
+                    amount: $this->fromMinorUnits($payment->amount, $payment->currency),
+                    currency: $payment->currency
+                );
             }
 
             $this->log('info', 'Razorpay payment verified', [
@@ -115,15 +129,20 @@ class RazorpayGateway extends AbstractGateway
                     'wallet' => $payment->wallet ?? null,
                     'vpa' => $payment->vpa ?? null,
                     'verification_payload' => $payload
-                ]
+                ],
+                gatewayReference: $orderId,
+                amount: $this->fromMinorUnits($payment->amount, $payment->currency),
+                currency: $payment->currency
             );
 
+        } catch (InvalidSignatureException $e) {
+            throw $e;
         } catch (\Exception $e) {
             $this->log('error', 'Razorpay payment verification failed', [
                 'error' => $e->getMessage(),
                 'payload' => $payload
             ]);
-            throw new PaymentException('Razorpay payment verification failed: ' . $e->getMessage());
+            throw new PaymentException('Razorpay payment verification failed: ' . $e->getMessage(), 0, $e);
         }
     }
 
@@ -321,7 +340,26 @@ class RazorpayGateway extends AbstractGateway
     }
 
     /**
-     * Process webhook event
+     * Handle a Razorpay webhook: verifies X-Razorpay-Signature (HMAC-SHA256 of
+     * the raw body with the webhook secret set in the Razorpay dashboard).
+     */
+    public function handleWebhook(array $payload, string $rawBody, array $headers): PaymentResponse
+    {
+        $secret = $this->getModeConfig('webhook_secret');
+        if (!$secret) {
+            throw PaymentException::configuration('razorpay', 'webhook_secret is required to accept Razorpay webhooks');
+        }
+
+        $signature = $headers['x-razorpay-signature'] ?? '';
+        if ($signature === '' || !hash_equals(hash_hmac('sha256', $rawBody, $secret), $signature)) {
+            throw new InvalidSignatureException('Invalid Razorpay webhook signature', gateway: 'razorpay');
+        }
+
+        return $this->processWebhook($payload);
+    }
+
+    /**
+     * Process a (signature-verified) webhook event
      */
     public function processWebhook(array $payload): PaymentResponse
     {
@@ -333,8 +371,8 @@ class RazorpayGateway extends AbstractGateway
             // Process different webhook events
             switch ($eventType) {
                 case 'payment.authorized':
-                    $status = 'authorized';
-                    $success = true;
+                    $status = 'pending';
+                    $success = false;
                     $transactionId = $eventData['id'] ?? null;
                     break;
 
@@ -352,7 +390,7 @@ class RazorpayGateway extends AbstractGateway
 
                 case 'refund.processed':
                     $status = 'refunded';
-                    $success = true;
+                    $success = false;
                     $transactionId = $eventData['payment_id'] ?? null;
                     break;
 
@@ -368,8 +406,8 @@ class RazorpayGateway extends AbstractGateway
                     $transactionId = $eventData['id'] ?? $eventData['order_id'] ?? null;
             }
 
-            $amount = $eventData['amount'] ?? 0;
             $currency = $eventData['currency'] ?? 'INR';
+            $amount = $this->fromMinorUnits($eventData['amount'] ?? 0, $currency);
 
             $this->log('info', 'Razorpay webhook processed', [
                 'event_type' => $eventType,
@@ -381,10 +419,12 @@ class RazorpayGateway extends AbstractGateway
                 success: $success,
                 transactionId: $transactionId,
                 status: $status,
+                gatewayReference: $eventData['order_id'] ?? null,
+                amount: $amount,
+                currency: $currency,
                 data: [
                     'event_type' => $eventType,
-                    'amount' => $amount / 100, // Convert from paise
-                    'currency' => $currency,
+                    'order_id' => $eventData['order_id'] ?? null,
                     'method' => $eventData['method'] ?? null,
                     'email' => $eventData['email'] ?? null,
                     'contact' => $eventData['contact'] ?? null,
@@ -453,8 +493,8 @@ class RazorpayGateway extends AbstractGateway
      */
     private function createOrder(PaymentRequest $request): Order
     {
-        $amountInPaise = (int) round($request->getAmount() * 100);
-        $currency = strtoupper($request->getCurrency() ?? 'INR');
+        $currency = strtoupper($request->getCurrency() ?: 'INR');
+        $amountInPaise = $this->toMinorUnits($request->getAmount(), $currency);
         $metadata = $request->getMetadata();
 
         $orderData = [
@@ -493,13 +533,12 @@ class RazorpayGateway extends AbstractGateway
      */
     private function createRefund(string $paymentId, float $amount): RazorpayRefund
     {
-        $refundData = [
-            'payment_id' => $paymentId,
-        ];
+        $payment = $this->getRazorpay()->payment->fetch($paymentId);
+        $refundData = [];
 
         // Refund specific amount if provided (partial refund)
         if ($amount > 0) {
-            $refundData['amount'] = (int) round($amount * 100);
+            $refundData['amount'] = $this->toMinorUnits($amount, $payment->currency);
         }
 
         // Add notes if needed
@@ -508,7 +547,7 @@ class RazorpayGateway extends AbstractGateway
             'refund_source' => 'api'
         ];
 
-        return $this->getRazorpay()->refund->create($refundData);
+        return $payment->refund($refundData);
     }
 
     /**

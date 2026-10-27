@@ -2,28 +2,69 @@
 
 namespace Mdiqbal\LaravelPayments\DTO;
 
+use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 
 class WebhookPayload
 {
+    /**
+     * @param array<string, string> $headers lower-cased header name => value
+     */
     public function __construct(
         public readonly string $gateway,
         public readonly array $payload,
         public readonly ?string $signature = null,
-        public readonly array $headers = []
+        public readonly array $headers = [],
+        public readonly string $rawBody = ''
     ) {}
 
     /**
-     * Create webhook payload from request
+     * Create webhook payload from request data.
+     *
+     * Header values may be given as strings or as the arrays Symfony's
+     * HeaderBag::all() returns; only the first value of each header is kept.
      */
-    public static function fromRequest(string $gateway, array $payload, array $headers = []): self
+    public static function fromRequest(string $gateway, array $payload, array $headers = [], string $rawBody = ''): self
     {
+        $headers = self::normalizeHeaders($headers);
+
         return new self(
             gateway: $gateway,
             payload: $payload,
-            signature: Arr::get($headers, 'signature') ?: Arr::get($headers, 'x-signature') ?: Arr::get($headers, 'webhook-signature'),
-            headers: $headers
+            signature: $headers['signature'] ?? $headers['x-signature'] ?? $headers['webhook-signature'] ?? null,
+            headers: $headers,
+            rawBody: $rawBody
         );
+    }
+
+    /**
+     * Create webhook payload from an HTTP request.
+     */
+    public static function fromHttpRequest(string $gateway, Request $request): self
+    {
+        return self::fromRequest($gateway, $request->all(), $request->headers->all(), (string) $request->getContent());
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public static function normalizeHeaders(array $headers): array
+    {
+        $normalized = [];
+
+        foreach ($headers as $name => $value) {
+            if (is_array($value)) {
+                $value = reset($value);
+            }
+
+            if ($value === false || $value === null) {
+                continue;
+            }
+
+            $normalized[strtolower((string) $name)] = (string) $value;
+        }
+
+        return $normalized;
     }
 
     /**
@@ -51,11 +92,11 @@ class WebhookPayload
     }
 
     /**
-     * Get header value by key
+     * Get header value by key (case-insensitive)
      */
     public function getHeader(string $key, mixed $default = null): mixed
     {
-        return Arr::get($this->headers, $key, $default);
+        return $this->headers[strtolower($key)] ?? $default;
     }
 
     /**

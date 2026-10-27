@@ -11,7 +11,7 @@ $gatewayFiles = [
     'src/Gateways/Iyzico/IyzicoGateway.php',
     'src/Gateways/Midtrans/MidtransGateway.php',
     'src/Gateways/Mollie/MollieGateway.php',
-    'src/Gateways/MyFatoorah/MyfatoorahGateway.php',
+    'src/Gateways/MyFatoorah/MyFatoorahGateway.php',
     'src/Gateways/Paypal/PaypalGateway.php',
     'src/Gateways/Paytm/PaytmGateway.php',
     'src/Gateways/Pesapal/PesapalGateway.php',

@@ -55,7 +55,7 @@ class Payment extends Facade
      */
     public static function pay(string $gateway, PaymentRequest $request): PaymentResponse
     {
-        return static::gateway($gateway)->pay($request);
+        return app('payment')->pay($gateway, $request);
     }
 
     /**
@@ -63,7 +63,7 @@ class Payment extends Facade
      */
     public static function verify(string $gateway, array $payload): PaymentResponse
     {
-        return static::gateway($gateway)->verify($payload);
+        return app('payment')->verify($gateway, $payload);
     }
 
     /**
@@ -71,7 +71,7 @@ class Payment extends Facade
      */
     public static function refund(string $gateway, string $transactionId, float $amount): bool
     {
-        return static::gateway($gateway)->refund($transactionId, $amount);
+        return app('payment')->refund($gateway, $transactionId, $amount);
     }
 
     /**
@@ -79,7 +79,7 @@ class Payment extends Facade
      */
     public static function supportsRefund(string $gateway): bool
     {
-        return static::gateway($gateway)->supportsRefund();
+        return app('payment')->supportsRefund($gateway);
     }
 
     /**

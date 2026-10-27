@@ -205,7 +205,7 @@ class MollieGateway extends AbstractGateway
             return new PaymentResponse(
                 success: $isSuccess,
                 transactionId: $molliePayment->metadata->transaction_id ?? $molliePayment->id,
-                gatewayTransactionId: $molliePayment->id,
+                gatewayReference: $molliePayment->id,
                 status: $status,
                 amount: $amount,
                 currency: $currency,

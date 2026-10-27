@@ -1,6 +1,6 @@
 <?php
 
-namespace Mdiqbal\LaravelPayments\Gateways\Myfatoorah;
+namespace Mdiqbal\LaravelPayments\Gateways\MyFatoorah;
 
 use Mdiqbal\LaravelPayments\DTO\PaymentRequest;
 use Mdiqbal\LaravelPayments\DTO\PaymentResponse;
@@ -9,7 +9,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
-class MyfatoorahGateway extends AbstractGateway
+class MyFatoorahGateway extends AbstractGateway
 {
     /**
      * Gateway name

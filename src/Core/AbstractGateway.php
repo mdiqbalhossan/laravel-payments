@@ -64,7 +64,7 @@ abstract class AbstractGateway implements PaymentGatewayInterface
     /**
      * Get configuration value
      */
-    public function getConfig(?string $key = null, ?string $default = null): mixed
+    public function getConfig(?string $key = null, mixed $default = null): mixed
     {
         if ($key === null) {
             return $this->config;
@@ -184,12 +184,52 @@ abstract class AbstractGateway implements PaymentGatewayInterface
     }
 
     /**
-     * Get configuration value for current mode
+     * Get configuration value for current mode.
+     *
+     * Looks in the mode block first (e.g. "sandbox.secret_key", as published in
+     * config/payments.php) and falls back to a top-level key ("secret_key") so
+     * gateway-wide settings such as webhook secrets work in either place.
      */
     protected function getModeConfig(string $key, mixed $default = null): mixed
     {
-        $modeKey = "{$this->mode}.{$key}";
-        return $this->getConfig($modeKey, $default);
+        $value = $this->getConfig("{$this->mode}.{$key}");
+
+        if ($value === null || $value === '') {
+            $value = $this->getConfig($key);
+        }
+
+        return ($value === null || $value === '') ? $default : $value;
+    }
+
+    /**
+     * Get a required mode config value or fail loudly.
+     */
+    protected function requireModeConfig(string $key): mixed
+    {
+        $value = $this->getModeConfig($key);
+
+        if ($value === null || $value === '') {
+            throw PaymentException::configuration(
+                $this->gatewayName(),
+                "Missing '{$key}' for {$this->mode} mode (payments.gateways.{$this->gatewayName()}.{$this->mode}.{$key})"
+            );
+        }
+
+        return $value;
+    }
+
+    /**
+     * Handle an incoming webhook/IPN request.
+     *
+     * Gateways that sign webhooks should override this and verify $rawBody
+     * against the provider's signature header before trusting $payload.
+     * Throw InvalidSignatureException when verification fails.
+     *
+     * @param array<string, string> $headers lower-cased header name => value
+     */
+    public function handleWebhook(array $payload, string $rawBody, array $headers): PaymentResponse
+    {
+        return $this->verify($payload);
     }
 
     /**
@@ -228,12 +268,46 @@ abstract class AbstractGateway implements PaymentGatewayInterface
     }
 
     /**
+     * Number of decimal places in the currency's minor unit (ISO 4217).
+     */
+    protected function currencyDecimals(string $currency): int
+    {
+        $currency = strtoupper($currency);
+
+        if (in_array($currency, ['BIF', 'CLP', 'DJF', 'GNF', 'ISK', 'JPY', 'KMF', 'KRW', 'MGA', 'PYG', 'RWF', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF'], true)) {
+            return 0;
+        }
+
+        if (in_array($currency, ['BHD', 'IQD', 'JOD', 'KWD', 'LYD', 'OMR', 'TND'], true)) {
+            return 3;
+        }
+
+        return 2;
+    }
+
+    /**
+     * Convert a major-unit amount (e.g. 10.50 USD) to integer minor units (1050).
+     */
+    protected function toMinorUnits(float $amount, string $currency): int
+    {
+        return (int) round($amount * (10 ** $this->currencyDecimals($currency)));
+    }
+
+    /**
+     * Convert integer minor units back to a major-unit amount.
+     */
+    protected function fromMinorUnits(int|float|string|null $amount, string $currency): float
+    {
+        return ((float) $amount) / (10 ** $this->currencyDecimals($currency));
+    }
+
+    /**
      * Validate webhook signature
      */
     protected function validateWebhookSignature(array $payload, string $signature): bool
     {
-        // Default implementation - should be overridden by gateways
-        return true;
+        // Never trust a signature that was not actually checked
+        return false;
     }
 
     /**

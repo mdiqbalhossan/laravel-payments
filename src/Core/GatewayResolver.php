@@ -42,7 +42,7 @@ class GatewayResolver
         $name = strtolower($name);
 
         if (!isset($this->gatewayClasses[$name])) {
-            throw new GatewayNotFoundException("Gateway '{$name}' not found");
+            throw new GatewayNotFoundException($name);
         }
 
         if (isset($this->instances[$name])) {
@@ -52,13 +52,13 @@ class GatewayResolver
         $class = $this->gatewayClasses[$name];
 
         if (!class_exists($class)) {
-            throw new GatewayNotFoundException("Gateway class '{$class}' not found");
+            throw new GatewayNotFoundException("{$name} (class {$class} not found)");
         }
 
         $instance = new $class($this->getGatewayConfig($name));
 
         if (!$instance instanceof PaymentGatewayInterface) {
-            throw new GatewayNotFoundException("Gateway '{$class}' must implement PaymentGatewayInterface");
+            throw new GatewayNotFoundException("{$name} ({$class} must implement PaymentGatewayInterface)");
         }
 
         $this->instances[$name] = $instance;

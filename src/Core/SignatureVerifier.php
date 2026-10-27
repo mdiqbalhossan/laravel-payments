@@ -11,10 +11,15 @@ class SignatureVerifier
      */
     public static function verifyHmac(string $payload, string $signature, string $secret, string $algorithm = 'sha256'): bool
     {
-        $expectedSignature = hash_hmac($algorithm, $payload, $secret);
+        if ($signature === '' || $secret === '') {
+            return false;
+        }
 
-        return hash_equals($expectedSignature, $signature) ||
-               hash_equals($expectedSignature, base64_decode($signature));
+        $expectedHex = hash_hmac($algorithm, $payload, $secret);
+        $expectedBase64 = base64_encode(hash_hmac($algorithm, $payload, $secret, true));
+
+        return hash_equals($expectedHex, strtolower($signature)) ||
+               hash_equals($expectedBase64, $signature);
     }
 
     /**
@@ -97,17 +102,32 @@ class SignatureVerifier
     /**
      * Verify Stripe signature
      */
-    public static function verifyStripe(string $payload, string $signature, string $secret): bool
+    public static function verifyStripe(string $payload, string $signature, string $secret, int $tolerance = 300): bool
     {
-        $elements = explode(',', $signature);
+        $timestamp = null;
+        $signatures = [];
 
-        foreach ($elements as $element) {
-            $element = trim($element);
-            [$key, $value] = explode('=', $element, 2);
+        foreach (explode(',', $signature) as $element) {
+            $parts = explode('=', trim($element), 2);
+            if (count($parts) !== 2) {
+                continue;
+            }
+            if ($parts[0] === 't') {
+                $timestamp = (int) $parts[1];
+            } elseif ($parts[0] === 'v1') {
+                $signatures[] = $parts[1];
+            }
+        }
 
-            if ($key === 'v1') {
-                $expectedSignature = hash_hmac('sha256', $payload, $secret);
-                return hash_equals($expectedSignature, $value);
+        if ($timestamp === null || $signatures === [] || ($tolerance > 0 && abs(time() - $timestamp) > $tolerance)) {
+            return false;
+        }
+
+        $expected = hash_hmac('sha256', $timestamp . '.' . $payload, $secret);
+
+        foreach ($signatures as $candidate) {
+            if (hash_equals($expected, $candidate)) {
+                return true;
             }
         }
 
@@ -123,22 +143,21 @@ class SignatureVerifier
     }
 
     /**
-     * Verify Flutterwave signature
+     * Verify Flutterwave webhook: the "verif-hash" header must equal the secret
+     * hash configured in the Flutterwave dashboard (it is not an HMAC).
      */
-    public static function verifyFlutterwave(string $payload, string $signature, string $secret): bool
+    public static function verifyFlutterwave(string $verifHash, string $secretHash): bool
     {
-        return self::verifySha256($payload, $signature, $secret);
+        return $verifHash !== '' && $secretHash !== '' && hash_equals($secretHash, $verifHash);
     }
 
     /**
-     * Verify PhonePe signature
+     * Verify PhonePe callback X-VERIFY: sha256(base64Response + saltKey) . '###' . saltIndex
      */
-    public static function verifyPhonePe(string $payload, string $saltIndex, string $saltKey): bool
+    public static function verifyPhonePe(string $base64Response, string $xVerify, string $saltKey, string $saltIndex): bool
     {
-        $finalString = $payload . '/pg/v1/verify' . $saltKey;
-        $hash = hash('sha256', $finalString);
-        $expectedSignature = $hash . '###' . $saltIndex;
+        $expected = hash('sha256', $base64Response . $saltKey) . '###' . $saltIndex;
 
-        return hash_equals($expectedSignature, $signature);
+        return $xVerify !== '' && hash_equals($expected, $xVerify);
     }
 }

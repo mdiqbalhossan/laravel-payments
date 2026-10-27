@@ -5,6 +5,7 @@ namespace Mdiqbal\LaravelPayments\Gateways\Stripe;
 use Mdiqbal\LaravelPayments\Core\AbstractGateway;
 use Mdiqbal\LaravelPayments\DTO\PaymentRequest;
 use Mdiqbal\LaravelPayments\DTO\PaymentResponse;
+use Mdiqbal\LaravelPayments\Exceptions\InvalidSignatureException;
 use Mdiqbal\LaravelPayments\Exceptions\PaymentException;
 use Stripe\Stripe;
 use Stripe\StripeClient;
@@ -52,8 +53,8 @@ class StripeGateway extends AbstractGateway
                 'client_secret' => $paymentIntent->client_secret,
                 'payment_intent_id' => $paymentIntent->id,
                 'status' => $paymentIntent->status,
-                'amount' => $paymentIntent->amount / 100, // Convert from cents
-                'currency' => $paymentIntent->currency,
+                'amount' => $this->fromMinorUnits($paymentIntent->amount, $paymentIntent->currency),
+                'currency' => strtoupper($paymentIntent->currency),
                 'message' => 'PaymentIntent created successfully'
             ]);
 
@@ -66,89 +67,103 @@ class StripeGateway extends AbstractGateway
         }
     }
 
+    /**
+     * Verify a payment after redirect/callback.
+     *
+     * The payload is never trusted on its own: the PaymentIntent (or Checkout
+     * Session) is always re-fetched from Stripe. Accepts payment_intent /
+     * payment_intent_id / session_id / id, or a Stripe event array.
+     */
     public function verify(array $payload): PaymentResponse
     {
-        try {
-            // Verify webhook signature
-            $webhookSecret = $this->getModeConfig('webhook_secret');
-            if ($webhookSecret) {
-                $signature = $_SERVER['HTTP_STRIPE_SIGNATURE'] ?? '';
-                if (!$this->verifyWebhookSignature($payload, $signature, $webhookSecret)) {
-                    throw new PaymentException('Invalid Stripe webhook signature');
-                }
-            }
+        $object = $payload['data']['object'] ?? [];
+        $sessionId = $payload['session_id'] ?? (str_starts_with((string) ($payload['id'] ?? ''), 'cs_') ? $payload['id'] : null);
+        $intentFromEvent = ($object['object'] ?? null) === 'payment_intent'
+            ? ($object['id'] ?? null)
+            : ($object['payment_intent'] ?? null);
+        $intentId = $payload['payment_intent'] ?? $payload['payment_intent_id'] ?? $intentFromEvent;
 
-            $event = $payload;
-            $eventType = $event['type'] ?? '';
-            $eventObject = $event['data']['object'] ?? [];
-
-            // Process different webhook events
-            switch ($eventType) {
-                case 'payment_intent.succeeded':
-                    $status = 'completed';
-                    $success = true;
-                    $transactionId = $eventObject['id'] ?? null;
-                    break;
-
-                case 'payment_intent.payment_failed':
-                    $status = 'failed';
-                    $success = false;
-                    $transactionId = $eventObject['id'] ?? null;
-                    break;
-
-                case 'payment_intent.canceled':
-                    $status = 'canceled';
-                    $success = false;
-                    $transactionId = $eventObject['id'] ?? null;
-                    break;
-
-                case 'charge.succeeded':
-                    $status = 'completed';
-                    $success = true;
-                    $transactionId = $eventObject['payment_intent'] ?? null;
-                    break;
-
-                case 'charge.failed':
-                    $status = 'failed';
-                    $success = false;
-                    $transactionId = $eventObject['payment_intent'] ?? null;
-                    break;
-
-                default:
-                    $status = 'unknown';
-                    $success = false;
-                    $transactionId = $eventObject['id'] ?? $eventObject['payment_intent'] ?? null;
-            }
-
-            $amount = $eventObject['amount'] ?? 0;
-            $currency = $eventObject['currency'] ?? 'usd';
-
-            $this->log('info', 'Stripe webhook verified', [
-                'event_type' => $eventType,
-                'transaction_id' => $transactionId,
-                'status' => $status
-            ]);
-
-            return new PaymentResponse(
-                success: $success,
-                transactionId: $transactionId,
-                status: $status,
-                data: [
-                    'event_type' => $eventType,
-                    'amount' => $amount ? $amount / 100 : 0, // Convert from cents
-                    'currency' => strtoupper($currency),
-                    'charge_id' => $eventObject['id'] ?? null,
-                    'payment_method' => $eventObject['payment_method'] ?? null,
-                    'webhook_data' => $event
-                ]
-            );
-
-        } catch (\Exception $e) {
-            $this->log('error', 'Stripe webhook verification failed', [
-                'error' => $e->getMessage()
-            ]);
-            throw new PaymentException('Stripe webhook verification failed: ' . $e->getMessage());
+        if (!$intentId && str_starts_with((string) ($payload['id'] ?? ''), 'pi_')) {
+            $intentId = $payload['id'];
         }
+
+        try {
+            if (!$intentId && $sessionId) {
+                $session = $this->getStripeClient()->checkout->sessions->retrieve($sessionId);
+                $intentId = is_string($session->payment_intent) ? $session->payment_intent : ($session->payment_intent->id ?? null);
+            }
+
+            if (!$intentId) {
+                throw new PaymentException('No PaymentIntent or Checkout Session id found in payload');
+            }
+
+            return $this->retrievePayment($intentId);
+        } catch (PaymentException $e) {
+            throw $e;
+        } catch (\Exception $e) {
+            $this->log('error', 'Stripe verification failed', ['error' => $e->getMessage()]);
+            throw new PaymentException('Stripe verification failed: ' . $e->getMessage(), 0, $e);
+        }
+    }
+
+    /**
+     * Handle a Stripe webhook: verifies the Stripe-Signature header against the
+     * raw body using the configured webhook_secret (whsec_...).
+     */
+    public function handleWebhook(array $payload, string $rawBody, array $headers): PaymentResponse
+    {
+        $secret = $this->getModeConfig('webhook_secret');
+        if (!$secret) {
+            throw PaymentException::configuration('stripe', 'webhook_secret is required to accept Stripe webhooks');
+        }
+
+        try {
+            $event = Webhook::constructEvent($rawBody, $headers['stripe-signature'] ?? '', $secret);
+        } catch (SignatureVerificationException|\UnexpectedValueException $e) {
+            throw new InvalidSignatureException('Invalid Stripe webhook signature: ' . $e->getMessage(), gateway: 'stripe');
+        }
+
+        return $this->parseEvent($event->toArray());
+    }
+
+    /**
+     * Map a (signature-verified) Stripe event to a PaymentResponse.
+     */
+    protected function parseEvent(array $event): PaymentResponse
+    {
+        $eventType = $event['type'] ?? '';
+        $object = $event['data']['object'] ?? [];
+
+        [$status, $success] = match ($eventType) {
+            'payment_intent.succeeded', 'charge.succeeded' => ['completed', true],
+            'checkout.session.completed' => ($object['payment_status'] ?? '') === 'paid' ? ['completed', true] : ['pending', false],
+            'payment_intent.payment_failed', 'charge.failed' => ['failed', false],
+            'payment_intent.canceled' => ['canceled', false],
+            'charge.refunded' => ['refunded', false],
+            default => ['unknown', false],
+        };
+
+        $transactionId = ($object['object'] ?? '') === 'payment_intent'
+            ? ($object['id'] ?? null)
+            : ($object['payment_intent'] ?? $object['id'] ?? null);
+
+        $currency = strtoupper($object['currency'] ?? 'USD');
+        $minor = $object['amount_received'] ?? $object['amount_total'] ?? $object['amount'] ?? null;
+
+        return new PaymentResponse(
+            success: $success,
+            transactionId: $transactionId,
+            status: $status,
+            data: [
+                'event_type' => $eventType,
+                'event_id' => $event['id'] ?? null,
+                'order_id' => $object['metadata']['transaction_id'] ?? $object['client_reference_id'] ?? null,
+                'webhook_data' => $event,
+            ],
+            gatewayReference: $object['id'] ?? null,
+            amount: $minor !== null ? $this->fromMinorUnits($minor, $currency) : null,
+            currency: $currency
+        );
     }
 
     public function refund(string $transactionId, float $amount): bool
@@ -218,6 +233,7 @@ class StripeGateway extends AbstractGateway
             $paymentIntent = $this->getStripeClient()->paymentIntents->retrieve($paymentIntentId);
 
             $status = $paymentIntent->status === 'succeeded' ? 'completed' : $paymentIntent->status;
+            $currency = strtoupper($paymentIntent->currency);
 
             return new PaymentResponse(
                 success: $paymentIntent->status === 'succeeded',
@@ -225,15 +241,17 @@ class StripeGateway extends AbstractGateway
                 status: $status,
                 data: [
                     'client_secret' => $paymentIntent->client_secret,
-                    'amount' => $paymentIntent->amount / 100,
-                    'currency' => $paymentIntent->currency,
+                    'order_id' => $paymentIntent->metadata['transaction_id'] ?? null,
                     'payment_method' => $paymentIntent->payment_method,
-                    'charges' => $paymentIntent->charges->data ?? []
-                ]
+                    'latest_charge' => $paymentIntent->latest_charge ?? null,
+                ],
+                gatewayReference: $paymentIntent->id,
+                amount: $this->fromMinorUnits($paymentIntent->amount_received ?: $paymentIntent->amount, $currency),
+                currency: $currency
             );
 
         } catch (\Exception $e) {
-            throw new PaymentException('Stripe payment retrieval failed: ' . $e->getMessage());
+            throw new PaymentException('Stripe payment retrieval failed: ' . $e->getMessage(), 0, $e);
         }
     }
 
@@ -327,8 +345,8 @@ class StripeGateway extends AbstractGateway
      */
     private function createPaymentIntent(PaymentRequest $request): PaymentIntent
     {
-        $amountInCents = (int) round($request->getAmount() * 100);
-        $currency = strtolower($request->getCurrency() ?? 'USD');
+        $currency = strtolower($request->getCurrency() ?: 'USD');
+        $amountInCents = $this->toMinorUnits($request->getAmount(), $currency);
         $metadata = $request->getMetadata();
 
         $intentParams = [
@@ -356,8 +374,8 @@ class StripeGateway extends AbstractGateway
         }
 
         // Add email for guest checkout
-        if (isset($metadata['email'])) {
-            $intentParams['receipt_email'] = $metadata['email'];
+        if ($email = $metadata['email'] ?? $request->getEmail()) {
+            $intentParams['receipt_email'] = $email;
         }
 
         // Add custom metadata
@@ -394,30 +412,14 @@ class StripeGateway extends AbstractGateway
 
         // Refund specific amount if provided (partial refund)
         if ($amount > 0) {
-            $refundParams['amount'] = (int) round($amount * 100);
+            $intent = $this->getStripeClient()->paymentIntents->retrieve($paymentIntentId);
+            $refundParams['amount'] = $this->toMinorUnits($amount, $intent->currency);
         }
 
         // Add reason if provided
         $refundParams['reason'] = 'requested_by_customer';
 
         return $this->getStripeClient()->refunds->create($refundParams);
-    }
-
-    /**
-     * Verify webhook signature
-     */
-    private function verifyWebhookSignature(array $payload, string $signature, string $webhookSecret): bool
-    {
-        try {
-            $payloadString = json_encode($payload);
-            Webhook::constructEvent($payloadString, $signature, $webhookSecret);
-            return true;
-        } catch (SignatureVerificationException $e) {
-            $this->log('error', 'Stripe webhook signature verification failed', [
-                'error' => $e->getMessage()
-            ]);
-            return false;
-        }
     }
 
     /**
@@ -451,8 +453,8 @@ class StripeGateway extends AbstractGateway
     public function createCheckoutSession(PaymentRequest $request): PaymentResponse
     {
         try {
-            $amountInCents = (int) round($request->getAmount() * 100);
-            $currency = strtolower($request->getCurrency() ?? 'USD');
+            $currency = strtolower($request->getCurrency() ?: 'USD');
+            $amountInCents = $this->toMinorUnits($request->getAmount(), $currency);
             $metadata = $request->getMetadata();
 
             $sessionParams = [
@@ -471,14 +473,22 @@ class StripeGateway extends AbstractGateway
                 'mode' => 'payment',
                 'success_url' => $request->getReturnUrl() ?? route('payment.success'),
                 'cancel_url' => $request->getCancelUrl() ?? route('payment.cancel'),
+                'client_reference_id' => $request->getTransactionId(),
                 'metadata' => [
                     'transaction_id' => $request->getTransactionId() ?? $this->generateOrderId(),
+                ],
+                'payment_intent_data' => [
+                    'metadata' => [
+                        'transaction_id' => $request->getTransactionId(),
+                    ],
                 ],
             ];
 
             // Add customer if provided
             if (isset($metadata['customer_id'])) {
                 $sessionParams['customer'] = $metadata['customer_id'];
+            } elseif ($request->getEmail()) {
+                $sessionParams['customer_email'] = $request->getEmail();
             }
 
             // Add custom metadata

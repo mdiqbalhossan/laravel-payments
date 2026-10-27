@@ -93,7 +93,7 @@ class EasyPaisaGateway extends AbstractGateway implements PaymentGatewayInterfac
             return new PaymentResponse(
                 success: false,
                 message: $e->getMessage(),
-                code: 500
+                errorCode: 500
             );
         }
     }
@@ -277,7 +277,7 @@ class EasyPaisaGateway extends AbstractGateway implements PaymentGatewayInterfac
                 return new PaymentResponse(
                     success: false,
                     message: 'Transaction ID is required',
-                    code: 400
+                    errorCode: 400
                 );
             }
 
@@ -330,7 +330,7 @@ class EasyPaisaGateway extends AbstractGateway implements PaymentGatewayInterfac
             return new PaymentResponse(
                 success: false,
                 message: $e->getMessage(),
-                code: 500
+                errorCode: 500
             );
         }
     }
@@ -437,7 +437,7 @@ class EasyPaisaGateway extends AbstractGateway implements PaymentGatewayInterfac
                 return new PaymentResponse(
                     success: false,
                     message: 'Invalid webhook signature',
-                    code: 401
+                    errorCode: 401
                 );
             }
 
@@ -449,7 +449,7 @@ class EasyPaisaGateway extends AbstractGateway implements PaymentGatewayInterfac
                 return new PaymentResponse(
                     success: false,
                     message: 'Missing transaction ID',
-                    code: 400
+                    errorCode: 400
                 );
             }
 
@@ -480,7 +480,7 @@ class EasyPaisaGateway extends AbstractGateway implements PaymentGatewayInterfac
             return new PaymentResponse(
                 success: false,
                 message: $e->getMessage(),
-                code: 500
+                errorCode: 500
             );
         }
     }

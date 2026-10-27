@@ -114,10 +114,10 @@ class GatewayQaTest extends TestCase
         return new PaymentRequest(
             amount: 100.00,
             currency: $currency,
-            description: 'QA order',
-            orderId: 'QA_ORDER_1',
+            description: 'Test order',
+            orderId: 'ORDER_1001',
             email: 'buyer@example.com',
-            customer: ['name' => 'QA Buyer', 'email' => 'buyer@example.com', 'phone' => '01712345678'],
+            customer: ['name' => 'Test Buyer', 'email' => 'buyer@example.com', 'phone' => '01712345678'],
             returnUrl: 'https://shop.test/return',
             cancelUrl: 'https://shop.test/cancel',
             notifyUrl: 'https://shop.test/webhook',
@@ -225,7 +225,7 @@ class GatewayQaTest extends TestCase
         Http::fake(fn () => Http::response(['message' => 'refund rejected'], 400));
 
         $gateway = Payment::gateway($name);
-        $result = $this->attempt(fn () => $gateway->refund('QA_TXN_1', 10.00));
+        $result = $this->attempt(fn () => $gateway->refund('TXN_1001', 10.00));
 
         if (! $gateway->supportsRefund()) {
             $this->assertInstanceOf(PaymentException::class, $result, 'Unsupported refund should throw PaymentException');

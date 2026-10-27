@@ -50,10 +50,10 @@ interface PaymentGatewayInterface
      * Get gateway configuration
      *
      * @param string|null $key
-     * @param string|null $default
+     * @param mixed $default
      * @return mixed
      */
-    public function getConfig(?string $key = null, ?string $default = null): mixed;
+    public function getConfig(?string $key = null, mixed $default = null): mixed;
 
     /**
      * Set gateway configuration
