@@ -2,13 +2,25 @@
 
 namespace Mdiqbal\LaravelPayments\Gateways\PhonePe;
 
-use Exception;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Mdiqbal\LaravelPayments\Core\AbstractGateway;
 use Mdiqbal\LaravelPayments\DTO\PaymentRequest;
 use Mdiqbal\LaravelPayments\DTO\PaymentResponse;
+use Mdiqbal\LaravelPayments\Exceptions\InvalidSignatureException;
+use Mdiqbal\LaravelPayments\Exceptions\PaymentException;
 
+/**
+ * PhonePe PG Standard Checkout (salt-key / X-VERIFY API, /pg/v1).
+ *
+ * Config (per mode): merchant_id (or client_id), salt_key (or secret_key),
+ * salt_index (or key_index), optional merchant_user_id.
+ *
+ * Flow: pay() returns the PhonePe pay page URL; the merchantTransactionId
+ * (your order id) is the transaction id. verify() calls the Status API.
+ * Server-to-server callbacks ({"response": base64}) are checked with
+ * X-VERIFY = sha256(response . saltKey) . "###" . saltIndex.
+ */
 class PhonePeGateway extends AbstractGateway
 {
     public function gatewayName(): string
@@ -18,253 +30,130 @@ class PhonePeGateway extends AbstractGateway
 
     public function pay(PaymentRequest $request): PaymentResponse
     {
-        $this->validateRequest($request);
-
-        try {
-            // Generate X-VERIFY header and payment data
-            $paymentData = $this->buildPaymentData($request);
-            $xVerify = $this->generateXVerify($paymentData);
-
-            // Make API request to initiate payment
-            $response = Http::withHeaders([
-                'Content-Type' => 'application/json',
-                'X-VERIFY' => $xVerify,
-                'X-MERCHANT-ID' => $this->config->getMerchantId(),
-            ])->post($this->getEndpoint('pg/v1/pay'), $paymentData);
-
-            if (!$response->successful()) {
-                $this->logError('Payment initiation failed', [
-                    'response' => $response->body(),
-                    'status' => $response->status(),
-                    'request_id' => $request->getTransactionId()
-                ]);
-
-                return $this->createErrorResponse('Failed to initiate payment with PhonePe');
-            }
-
-            $result = $response->json();
-
-            if (isset($result['success']) && $result['success']) {
-                $paymentUrl = $result['data']['instrumentResponse']['redirectInfo']['url'] ?? null;
-
-                return PaymentResponse::redirect($paymentUrl, [
-                    'merchant_transaction_id' => $result['data']['merchantTransactionId'],
-                    'transaction_id' => $request->getTransactionId(),
-                    'phonepe_transaction_id' => $result['data']['transactionId'],
-                    'payment_instrument' => $result['data']['instrumentResponse'] ?? null,
-                    'message' => 'Redirect to PhonePe payment page'
-                ]);
-            }
-
-            return $this->createErrorResponse($result['message'] ?? 'Payment initiation failed');
-        } catch (Exception $e) {
-            $this->logError('Payment creation failed', [
-                'error' => $e->getMessage(),
-                'request_id' => $request->getTransactionId()
-            ]);
-
-            return $this->createErrorResponse($e->getMessage());
+        if (strtoupper($request->getCurrency() ?: 'INR') !== 'INR') {
+            throw new PaymentException('PhonePe only supports INR');
         }
+
+        $redirectUrl = $request->getReturnUrl();
+        if (!$redirectUrl) {
+            throw new PaymentException('PhonePe requires a return (redirect) URL');
+        }
+
+        $txnId = $request->getTransactionId() ?? $this->generateOrderId();
+        $customer = $request->getCustomer() ?? [];
+
+        $payload = array_filter([
+            'merchantId' => $this->merchantId(),
+            'merchantTransactionId' => $txnId,
+            'merchantUserId' => $this->getModeConfig('merchant_user_id') ?? ('MUID' . substr(md5((string) ($request->getEmail() ?? $txnId)), 0, 12)),
+            'amount' => (int) round($request->getAmount() * 100),
+            'redirectUrl' => $redirectUrl,
+            'redirectMode' => 'POST',
+            'callbackUrl' => $request->getNotifyUrl() ?? $redirectUrl,
+            'mobileNumber' => isset($customer['phone']) ? preg_replace('/\D/', '', (string) $customer['phone']) : null,
+            'paymentInstrument' => ['type' => 'PAY_PAGE'],
+        ], fn ($v) => $v !== null);
+
+        $result = $this->post('/pg/v1/pay', $payload);
+        $url = $result['data']['instrumentResponse']['redirectInfo']['url'] ?? null;
+
+        if (!($result['success'] ?? false) || !$url) {
+            throw new PaymentException('PhonePe: ' . ($result['message'] ?? $result['code'] ?? 'failed to initiate payment'));
+        }
+
+        return PaymentResponse::redirect($url, [
+            'transaction_id' => $txnId,
+            'message' => 'Redirect to PhonePe',
+        ]);
     }
 
+    /**
+     * Check status with the Status API. Accepts merchantTransactionId /
+     * transactionId (redirect POST) / transaction_id / order_id.
+     */
     public function verify(array $payload): PaymentResponse
     {
-        try {
-            $merchantTransactionId = $payload['merchantTransactionId'] ?? null;
-
-            if (!$merchantTransactionId) {
-                return $this->createErrorResponse('Merchant Transaction ID not found in webhook payload');
-            }
-
-            // Verify webhook signature
-            if (!$this->verifyWebhookSignature($payload)) {
-                return $this->createErrorResponse('Invalid webhook signature');
-            }
-
-            // Process the webhook event
-            $webhookResult = $this->processWebhook($payload);
-
-            if ($webhookResult['success']) {
-                return PaymentResponse::success([
-                    'transaction_id' => $merchantTransactionId,
-                    'merchant_transaction_id' => $merchantTransactionId,
-                    'phonepe_transaction_id' => $payload['transactionId'] ?? null,
-                    'status' => $this->mapPhonePeStatus($payload['code'] ?? 'unknown'),
-                    'payment_method' => $this->getPaymentMethodFromResponse($payload),
-                    'amount' => (float) ($payload['amount'] ?? 0),
-                    'currency' => 'INR', // PhonePe only supports INR
-                    'customer_info' => [
-                        'mobile_number' => $payload['paymentInstrument']['type'] === 'UPI' ? $payload['paymentInstrument']['upi']['vpa'] : null,
-                        'payer_name' => $payload['payer']['name'] ?? null,
-                        'payer_email' => null, // PhonePe doesn't provide email in webhooks
-                    ],
-                    'merchant_info' => [
-                        'phonepe_transaction_id' => $payload['transactionId'] ?? null,
-                        'merchant_id' => $payload['merchantId'] ?? null,
-                        'provider_reference_id' => $payload['providerReferenceId'] ?? null,
-                        'payment_instrument' => $payload['paymentInstrument'] ?? null,
-                        'payment_mode' => $payload['paymentMode'] ?? null,
-                    ],
-                    'metadata' => [
-                        'auth_date' => $payload['authDate'] ?? null,
-                        'response_code' => $payload['responseCode'] ?? null,
-                    ]
-                ]);
-            }
-
-            return $this->createErrorResponse('Webhook processing failed');
-        } catch (Exception $e) {
-            $this->logError('Payment verification failed', [
-                'error' => $e->getMessage(),
-                'payload' => $payload
-            ]);
-
-            return $this->createErrorResponse($e->getMessage());
+        $txnId = $payload['merchantTransactionId'] ?? $payload['transactionId'] ?? $payload['transaction_id'] ?? $payload['order_id'] ?? null;
+        if (!$txnId) {
+            throw new PaymentException('PhonePe merchantTransactionId not found in payload');
         }
+
+        $mid = $this->merchantId();
+        $path = "/pg/v1/status/{$mid}/" . rawurlencode($txnId);
+
+        $response = Http::timeout(30)->acceptJson()->withHeaders([
+            'X-VERIFY' => $this->xVerify($path),
+            'X-MERCHANT-ID' => $mid,
+        ])->get($this->baseUrl() . $path);
+
+        $result = $response->json() ?? [];
+        if (!$response->successful() && empty($result['code'])) {
+            throw new PaymentException("PhonePe status API failed with HTTP {$response->status()}");
+        }
+
+        $code = $result['code'] ?? 'UNKNOWN';
+        $data = $result['data'] ?? [];
+
+        return new PaymentResponse(
+            success: $code === 'PAYMENT_SUCCESS' && ($data['state'] ?? 'COMPLETED') === 'COMPLETED',
+            transactionId: $txnId,
+            message: $result['message'] ?? $code,
+            status: match ($code) {
+                'PAYMENT_SUCCESS' => 'completed',
+                'PAYMENT_PENDING' => 'pending',
+                default => 'failed',
+            },
+            data: [
+                'code' => $code,
+                'payment_instrument' => $data['paymentInstrument'] ?? null,
+                'raw' => $result,
+            ],
+            gatewayReference: $data['transactionId'] ?? null,
+            amount: isset($data['amount']) ? $data['amount'] / 100 : null,
+            currency: 'INR'
+        );
     }
 
-    public function verifyTransaction(string $merchantTransactionId): PaymentResponse
+    /**
+     * Server-to-server callback: {"response": "<base64>"} with X-VERIFY header.
+     */
+    public function handleWebhook(array $payload, string $rawBody, array $headers): PaymentResponse
     {
-        try {
-            if (empty($merchantTransactionId)) {
-                return $this->createErrorResponse('Merchant Transaction ID is required');
-            }
+        $encoded = (string) ($payload['response'] ?? '');
+        $expected = hash('sha256', $encoded . $this->saltKey()) . '###' . $this->saltIndex();
 
-            // Check transaction status using PhonePe API
-            $checkStatusData = [
-                'merchantId' => $this->config->getMerchantId(),
-                'merchantTransactionId' => $merchantTransactionId,
-            ];
-
-            $xVerify = $this->generateStatusCheckXVerify($checkStatusData);
-
-            $response = Http::withHeaders([
-                'Content-Type' => 'application/json',
-                'X-VERIFY' => $xVerify,
-                'X-MERCHANT-ID' => $this->config->getMerchantId(),
-            ])->post($this->getEndpoint('pg/v1/status'), $checkStatusData);
-
-            if (!$response->successful()) {
-                return $this->createErrorResponse('Failed to check payment status');
-            }
-
-            $result = $response->json();
-
-            if (isset($result['success']) && $result['success']) {
-                return PaymentResponse::success([
-                    'transaction_id' => $merchantTransactionId,
-                    'merchant_transaction_id' => $merchantTransactionId,
-                    'phonepe_transaction_id' => $result['data']['transactionId'] ?? null,
-                    'status' => $this->mapPhonePeStatus($result['data']['code'] ?? 'unknown'),
-                    'payment_method' => $this->getPaymentMethodFromResponse($result['data']),
-                    'amount' => (float) ($result['data']['amount'] ?? 0),
-                    'currency' => 'INR',
-                    'customer_info' => [
-                        'mobile_number' => $this->getMobileNumberFromResponse($result['data']),
-                        'payer_name' => $result['data']['payer']['name'] ?? null,
-                    ],
-                    'merchant_info' => [
-                        'phonepe_transaction_id' => $result['data']['transactionId'] ?? null,
-                        'merchant_id' => $result['data']['merchantId'] ?? null,
-                        'provider_reference_id' => $result['data']['providerReferenceId'] ?? null,
-                        'payment_instrument' => $result['data']['paymentInstrument'] ?? null,
-                    ],
-                    'metadata' => [
-                        'auth_date' => $result['data']['authDate'] ?? null,
-                        'response_code' => $result['data']['responseCode'] ?? null,
-                        'pay_response_code' => $result['data']['payResponseCode'] ?? null,
-                    ]
-                ]);
-            }
-
-            return $this->createErrorResponse('Transaction not found or query failed');
-        } catch (Exception $e) {
-            $this->logError('Payment verification failed', [
-                'error' => $e->getMessage(),
-                'merchant_transaction_id' => $merchantTransactionId
-            ]);
-
-            return $this->createErrorResponse($e->getMessage());
+        if ($encoded === '' || !hash_equals($expected, $headers['x-verify'] ?? '')) {
+            throw new InvalidSignatureException('Invalid PhonePe X-VERIFY', gateway: 'phonepe');
         }
+
+        $decoded = json_decode(base64_decode($encoded), true) ?? [];
+
+        return $this->verify(['merchantTransactionId' => $decoded['data']['merchantTransactionId'] ?? null]);
     }
 
+    /**
+     * Refund. $transactionId is the original merchantTransactionId.
+     */
     public function refund(string $transactionId, float $amount): bool
     {
-        try {
-            Log::info('Processing PhonePe refund', [
-                'transaction_id' => $transactionId,
-                'amount' => $amount
-            ]);
-
-            if (empty($transactionId)) {
-                Log::error('PhonePe refund failed: Merchant Transaction ID is required');
-                return false;
-            }
-
-            // Get original transaction details first
-            $originalTransaction = $this->verifyTransaction($transactionId);
-
-            if (!$originalTransaction->getSuccess()) {
-                Log::error('PhonePe refund failed: Original transaction not found', [
-                    'transaction_id' => $transactionId
-                ]);
-                return false;
-            }
-
-            // Prepare refund request
-            $refundData = [
-                'merchantId' => $this->config->getMerchantId(),
-                'merchantUserId' => $this->config->getMerchantUserId(),
-                'merchantTransactionId' => $transactionId,
-                'originalTransactionId' => $originalTransaction->getData()['phonepe_transaction_id'] ?? null,
-                'refundAmount' => (int) round($amount * 100), // Convert to paise
-                'refundedAmount' => (int) round($amount * 100),
-            ];
-
-            // Generate X-VERIFY for refund
-            $xVerify = $this->generateRefundXVerify($refundData);
-
-            $response = Http::withHeaders([
-                'Content-Type' => 'application/json',
-                'X-VERIFY' => $xVerify,
-                'X-MERCHANT-ID' => $this->config->getMerchantId(),
-            ])->post($this->getEndpoint('pg/v1/refund'), $refundData);
-
-            if (!$response->successful()) {
-                Log::error('PhonePe refund request failed', [
-                    'transaction_id' => $transactionId,
-                    'amount' => $amount,
-                    'status' => $response->status(),
-                    'response' => $response->body()
-                ]);
-                return false;
-            }
-
-            $result = $response->json();
-
-            if (isset($result['success']) && $result['success']) {
-                Log::info('PhonePe refund processed successfully', [
-                    'transaction_id' => $transactionId,
-                    'amount' => $amount,
-                    'refund_id' => $result['data']['refundTransactionId'] ?? null
-                ]);
-                return true;
-            }
-
-            Log::error('PhonePe refund processing failed', [
-                'transaction_id' => $transactionId,
-                'amount' => $amount,
-                'error' => $result['message'] ?? 'Unknown error'
-            ]);
-            return false;
-        } catch (Exception $e) {
-            Log::error('PhonePe refund processing exception', [
-                'transaction_id' => $transactionId,
-                'amount' => $amount,
-                'error' => $e->getMessage()
-            ]);
-            return false;
+        if ($amount <= 0) {
+            $amount = (float) $this->verify(['merchantTransactionId' => $transactionId])->amount;
         }
+
+        $result = $this->post('/pg/v1/refund', [
+            'merchantId' => $this->merchantId(),
+            'merchantUserId' => $this->getModeConfig('merchant_user_id') ?? 'MUID_REFUND',
+            'originalTransactionId' => $transactionId,
+            'merchantTransactionId' => 'RF' . Str::upper(Str::random(16)),
+            'amount' => (int) round($amount * 100),
+            'callbackUrl' => $this->getModeConfig('refund_callback_url') ?? url('/'),
+        ]);
+
+        if (($result['success'] ?? false) && in_array($result['code'] ?? null, ['PAYMENT_SUCCESS', 'PAYMENT_PENDING'], true)) {
+            return true;
+        }
+
+        throw new PaymentException('PhonePe refund failed: ' . ($result['message'] ?? $result['code'] ?? 'unknown error'));
     }
 
     public function supportsRefund(): bool
@@ -272,365 +161,50 @@ class PhonePeGateway extends AbstractGateway
         return true;
     }
 
-    public function getTransactionStatus(string $merchantTransactionId): PaymentResponse
+    /**
+     * X-VERIFY = sha256(base64Body . apiPath . saltKey) . "###" . saltIndex
+     * (for GET requests base64Body is empty). The salt key itself is never sent.
+     */
+    public function xVerify(string $path, string $base64Body = ''): string
     {
-        return $this->verifyTransaction($merchantTransactionId);
+        return hash('sha256', $base64Body . $path . $this->saltKey()) . '###' . $this->saltIndex();
     }
 
-    public function searchTransactions(array $filters = []): PaymentResponse
+    private function post(string $path, array $payload): array
     {
-        try {
-            // PhonePe doesn't provide a direct search API with this package
-            // This would typically require additional PhonePe services
-            return $this->createErrorResponse('Transaction search not available with current PhonePe integration');
-        } catch (Exception $e) {
-            $this->logError('Transaction search failed', [
-                'error' => $e->getMessage(),
-                'filters' => $filters
-            ]);
+        $encoded = base64_encode(json_encode($payload, JSON_UNESCAPED_SLASHES));
 
-            return $this->createErrorResponse($e->getMessage());
-        }
-    }
+        $response = Http::timeout(30)->acceptJson()->withHeaders([
+            'X-VERIFY' => $this->xVerify($path, $encoded),
+        ])->post($this->baseUrl() . $path, ['request' => $encoded]);
 
-    public function getSupportedCurrencies(): array
-    {
-        return ['INR']; // PhonePe only supports Indian Rupee
-    }
-
-    public function getPaymentMethodsForCountry(string $countryCode): array
-    {
-        return $this->config->getPaymentMethods($countryCode) ?? [];
-    }
-
-    protected function buildPaymentData(PaymentRequest $request): array
-    {
-        return [
-            'merchantId' => $this->config->getMerchantId(),
-            'merchantTransactionId' => $request->getTransactionId(),
-            'merchantUserId' => $this->config->getMerchantUserId(),
-            'amount' => (int) round($request->getAmount() * 100), // Convert to paise
-            'redirectUrl' => $request->getRedirectUrl(),
-            'redirectMode' => 'POST',
-            'callbackUrl' => $this->config->getWebhookUrl(),
-            'mobileNumber' => $this->getMobileNumberFromRequest($request),
-            'email' => $request->getEmail(),
-            'shortName' => $this->getShortNameFromRequest($request),
-            'requestType' => 'PAY',
-            'paymentInstrument' => [
-                'type' => 'PAY_PAGE'
-            ]
-        ];
-    }
-
-    protected function generateXVerify(array $data): string
-    {
-        $stringToEncode = $this->config->getMerchantId() . '|' .
-                           ($data['merchantTransactionId'] ?? '') . '|' .
-                           ($data['merchantUserId'] ?? '') . '|' .
-                           ($data['amount'] ?? '') . '|' .
-                           ($data['redirectUrl'] ?? '') . '|' .
-                           ($data['redirectMode'] ?? '') . '|' .
-                           ($data['callbackUrl'] ?? '') . '|' .
-                           ($data['paymentInstrument']['type'] ?? '') . '|' .
-                           ($data['requestType'] ?? '');
-
-        $hash = hash('sha256', $stringToEncode, false);
-        $salt = $this->config->getSaltKey();
-
-        return $hash . '###' . $salt;
-    }
-
-    protected function generateStatusCheckXVerify(array $data): string
-    {
-        $stringToEncode = '/pg/v1/status' . '|' .
-                           ($data['merchantId'] ?? '') . '|' .
-                           ($data['merchantTransactionId'] ?? '') . '|' .
-                           ($data['merchantUserId'] ?? '') . '|' .
-                           ($data['requestType'] ?? '');
-
-        $hash = hash('sha256', $stringToEncode, false);
-        $salt = $this->config->getSaltKey();
-
-        return $hash . '###' . $salt;
-    }
-
-    protected function generateRefundXVerify(array $data): string
-    {
-        $stringToEncode = '/pg/v1/refund' . '|' .
-                           ($data['merchantId'] ?? '') . '|' .
-                           ($data['merchantUserId'] ?? '') . '|' .
-                           ($data['merchantTransactionId'] ?? '') . '|' .
-                           ($data['originalTransactionId'] ?? '') . '|' .
-                           ($data['refundAmount'] ?? '') . '|' .
-                           ($data['refundedAmount'] ?? '');
-
-        $hash = hash('sha256', $stringToEncode, false);
-        $salt = $this->config->getSaltKey();
-
-        return $hash . '###' . $salt;
-    }
-
-    protected function generateWebhookXVerify(string $webhookData): string
-    {
-        $hash = hash('sha256', $webhookData, false);
-        $salt = $this->config->getSaltKey();
-
-        return $hash . '###' . $salt;
-    }
-
-    protected function verifyWebhookSignature(array $payload): bool
-    {
-        try {
-            $xVerifyHeader = $_SERVER['HTTP_X_VERIFY'] ?? '';
-            $webhookData = json_encode($payload);
-
-            if (empty($xVerifyHeader)) {
-                return false;
-            }
-
-            $expectedXVerify = $this->generateWebhookXVerify($webhookData);
-
-            return hash_equals($expectedXVerify, $xVerifyHeader);
-        } catch (Exception $e) {
-            $this->logError('Webhook signature verification failed', [
-                'error' => $e->getMessage()
-            ]);
-
-            return false;
-        }
-    }
-
-    protected function processWebhook(array $payload): array
-    {
-        try {
-            $code = $payload['code'] ?? '';
-
-            switch ($code) {
-                case 'PAYMENT_SUCCESS':
-                    return [
-                        'success' => true,
-                        'event_type' => 'payment.completed',
-                        'status' => 'completed'
-                    ];
-
-                case 'PAYMENT_PENDING':
-                    return [
-                        'success' => true,
-                        'event_type' => 'payment.pending',
-                        'status' => 'pending'
-                    ];
-
-                case 'PAYMENT_ERROR':
-                case 'AUTHORIZATION_FAILED':
-                    return [
-                        'success' => true,
-                        'event_type' => 'payment.failed',
-                        'status' => 'failed'
-                    ];
-
-                case 'TXN_SUCCESS':
-                    return [
-                        'success' => true,
-                        'event_type' => 'payment.completed',
-                        'status' => 'completed'
-                    ];
-
-                case 'TXN_FAILED':
-                    return [
-                        'success' => true,
-                        'event_type' => 'payment.failed',
-                        'status' => 'failed'
-                    ];
-
-                case 'REFUND_SUCCESS':
-                    return [
-                        'success' => true,
-                        'event_type' => 'payment.refunded',
-                        'status' => 'refunded'
-                    ];
-
-                default:
-                    return [
-                        'success' => false,
-                        'error' => 'Unknown payment status: ' . $code
-                    ];
-            }
-        } catch (Exception $e) {
-            $this->logError('Webhook processing failed', [
-                'error' => $e->getMessage(),
-                'payload' => $payload
-            ]);
-
-            return [
-                'success' => false,
-                'error' => $e->getMessage()
-            ];
-        }
-    }
-
-    protected function mapPhonePeStatus(string $status): string
-    {
-        $statusMap = [
-            'PAYMENT_SUCCESS' => 'completed',
-            'PAYMENT_PENDING' => 'pending',
-            'PAYMENT_ERROR' => 'failed',
-            'AUTHORIZATION_FAILED' => 'failed',
-            'TXN_SUCCESS' => 'completed',
-            'TXN_FAILED' => 'failed',
-            'REFUND_SUCCESS' => 'refunded',
-            'BAD_REQUEST' => 'failed',
-            'INTERNAL_ERROR' => 'failed',
-            'TXN_EXPIRED' => 'expired',
-        ];
-
-        return $statusMap[$status] ?? 'unknown';
-    }
-
-    protected function getMobileNumberFromRequest(PaymentRequest $request): ?string
-    {
-        $customer = $request->getCustomer();
-        return $customer['phone'] ?? null;
-    }
-
-    protected function getShortNameFromRequest(PaymentRequest $request): string
-    {
-        $customer = $request->getCustomer();
-        return $this->getShortName($customer['name'] ?? '');
-    }
-
-    protected function getShortName(string $fullName): string
-    {
-        return substr($fullName, 0, 50); // PhonePe has 50 character limit
-    }
-
-    protected function getMobileNumberFromResponse(array $data): ?string
-    {
-        $paymentInstrument = $data['paymentInstrument'] ?? [];
-
-        if (isset($paymentInstrument['type']) && $paymentInstrument['type'] === 'UPI') {
-            return $paymentInstrument['upi']['vpa'] ?? null;
+        $json = $response->json() ?? [];
+        if (!$response->successful() && empty($json['code'])) {
+            throw new PaymentException("PhonePe API {$path} failed with HTTP {$response->status()}");
         }
 
-        return null;
+        return $json;
     }
 
-    protected function getPaymentMethodFromResponse(array $data): ?string
+    private function merchantId(): string
     {
-        $paymentInstrument = $data['paymentInstrument'] ?? [];
-        $paymentMode = $data['paymentMode'] ?? null;
-
-        if (isset($paymentInstrument['type'])) {
-            switch ($paymentInstrument['type']) {
-                case 'UPI':
-                    return 'UPI';
-                case 'CREDIT_CARD':
-                    return 'Credit Card';
-                case 'DEBIT_CARD':
-                    return 'Debit Card';
-                case 'NET_BANKING':
-                    return 'Net Banking';
-                case 'PAYTM':
-                    return 'Paytm';
-                default:
-                    return $paymentInstrument['type'];
-            }
-        }
-
-        return $paymentMode;
+        return $this->getModeConfig('merchant_id') ?? $this->requireModeConfig('client_id');
     }
 
-    protected function validateRequest(PaymentRequest $request): void
+    private function saltKey(): string
     {
-        if ($request->getAmount() <= 0) {
-            throw new Exception('Payment amount must be greater than 0');
-        }
-
-        if (empty($request->getTransactionId())) {
-            throw new Exception('Transaction ID is required');
-        }
-
-        if (empty($request->getEmail())) {
-            throw new Exception('Customer email is required');
-        }
-
-        // PhonePe only supports INR
-        if ($request->getCurrency() !== 'INR') {
-            throw new Exception("Currency {$request->getCurrency()} is not supported. PhonePe only supports INR (Indian Rupee).");
-        }
-
-        // PhonePe minimum amount is 1 INR (100 paise)
-        if ($request->getAmount() < 1) {
-            throw new Exception('Payment amount must be at least 1 INR');
-        }
+        return $this->getModeConfig('salt_key') ?? $this->requireModeConfig('secret_key');
     }
 
-    protected function getEndpoint(string $path): string
+    private function saltIndex(): string
     {
-        $baseUrl = $this->isSandbox()
+        return (string) ($this->getModeConfig('salt_index') ?? $this->getModeConfig('key_index') ?? '1');
+    }
+
+    private function baseUrl(): string
+    {
+        return $this->getModeConfig('base_url') ?? ($this->isSandbox()
             ? 'https://api-preprod.phonepe.com/apis/pg-sandbox'
-            : 'https://api.phonepe.com/apis/hermes';
-
-        return $baseUrl . '/' . ltrim($path, '/');
-    }
-
-    protected function createErrorResponse(string $message): PaymentResponse
-    {
-        return PaymentResponse::error($message, 400, [
-            'gateway' => 'phonepe',
-            'timestamp' => time()
-        ]);
-    }
-
-    public function parseCallback($request): array
-    {
-        return [
-            'merchantTransactionId' => $request->input('merchantTransactionId'),
-            'transactionId' => $request->input('transactionId'),
-            'amount' => $request->input('amount'),
-            'code' => $request->input('code'),
-            'responseCode' => $request->input('responseCode'),
-            'authDate' => $request->input('authDate'),
-            'paymentInstrument' => $request->input('paymentInstrument'),
-            'paymentMode' => $request->input('paymentMode'),
-            'providerReferenceId' => $request->input('providerReferenceId'),
-            'payer' => $request->input('payer'),
-            'merchantId' => $request->input('merchantId'),
-            'raw_body' => $request->getContent(),
-            'headers' => $request->headers->all()
-        ];
-    }
-
-    public function getGatewayConfig(): array
-    {
-        return [
-            'merchant_id' => $this->config->getMerchantId(),
-            'merchant_user_id' => $this->config->getMerchantUserId(),
-            'salt_key' => $this->config->getSaltKey(),
-            'test_mode' => $this->isSandbox(),
-            'country' => $this->config->getCountry(),
-            'webhook_url' => $this->config->getWebhookUrl()
-        ];
-    }
-
-    public function createSubscription(array $subscriptionData): PaymentResponse
-    {
-        try {
-            // PhonePe doesn't have direct subscription API with this package
-            // This would typically require PhonePe's subscription services
-            return $this->createErrorResponse('Subscription feature not available with current PhonePe integration');
-        } catch (Exception $e) {
-            return $this->createErrorResponse($e->getMessage());
-        }
-    }
-
-    public function cancelSubscription(string $subscriptionId): PaymentResponse
-    {
-        try {
-            // PhonePe doesn't have direct subscription API with this package
-            return $this->createErrorResponse('Subscription feature not available with current PhonePe integration');
-        } catch (Exception $e) {
-            return $this->createErrorResponse($e->getMessage());
-        }
+            : 'https://api.phonepe.com/apis/hermes');
     }
 }

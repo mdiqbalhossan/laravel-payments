@@ -18,6 +18,9 @@
         <testsuite name="Feature">
             <directory>tests/Feature</directory>
         </testsuite>
+        <testsuite name="QA">
+            <directory>tests/QA</directory>
+        </testsuite>
     </testsuites>
 
     <source>
@@ -26,18 +29,18 @@
         </include>
     </source>
 
-    <coverage>
-        <report>
-            <html outputDirectory="coverage-html"/>
-            <text outputFile="coverage.txt"/>
-            <clover outputFile="coverage.xml"/>
-        </report>
-    </coverage>
 
     <php>
         <env name="APP_ENV" value="testing"/>
-        <env name="APP_KEY" value="base64:TestKeyForPHPUnit"/>
+        <env name="APP_KEY" value="base64:2fl+Ktvkfl+Fuz4Qp/A75G2RTiWVA/ZoKZvp6fiiM10="/>
         <env name="DB_CONNECTION" value="sqlite"/>
         <env name="DB_DATABASE" value=":memory:"/>
+        <!-- Tests never reach real providers: SDK/raw HTTP calls fail fast -->
+        <env name="HTTPS_PROXY" value="http://127.0.0.1:9" force="true"/>
+        <env name="https_proxy" value="http://127.0.0.1:9" force="true"/>
+        <env name="HTTP_PROXY" value="http://127.0.0.1:9" force="true"/>
+        <env name="http_proxy" value="http://127.0.0.1:9" force="true"/>
+        <env name="NO_PROXY" value="" force="true"/>
+        <env name="no_proxy" value="" force="true"/>
     </php>
 </phpunit>

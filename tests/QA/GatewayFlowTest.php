@@ -24,6 +24,15 @@ class GatewayFlowTest extends TestCase
             'paystack' => ['mode' => 'sandbox', 'sandbox' => ['secret_key' => 'sk_test_paystack']],
             'sslcommerz' => ['mode' => 'sandbox', 'sandbox' => ['store_id' => 'teststore', 'store_password' => 'storepass']],
             'bkash' => ['mode' => 'sandbox', 'sandbox' => ['app_key' => 'ak', 'app_secret' => 'as', 'username' => 'u', 'password' => 'p']],
+            'phonepe' => ['mode' => 'sandbox', 'sandbox' => ['merchant_id' => 'PGTESTPAYUAT', 'salt_key' => 'salt-123', 'salt_index' => '1']],
+            'myfatoorah' => ['mode' => 'sandbox', 'sandbox' => ['api_key' => 'mf_key']],
+            'pesapal' => ['mode' => 'sandbox', 'sandbox' => ['consumer_key' => 'ck', 'consumer_secret' => 'cs', 'ipn_id' => 'ipn-1']],
+            'iyzico' => ['mode' => 'sandbox', 'sandbox' => ['api_key' => 'iyz_api', 'secret_key' => 'iyz_secret']],
+            'telr' => ['mode' => 'sandbox', 'sandbox' => ['store_id' => '1234', 'store_auth_key' => 'telrkey']],
+            'payfast' => ['mode' => 'sandbox', 'sandbox' => ['merchant_id' => '10000100', 'merchant_key' => '46f0cd694581a', 'pass_phrase' => 'jt7NOE43FZPn']],
+            'skrill' => ['mode' => 'sandbox', 'sandbox' => ['merchant_email' => 'shop@example.com', 'secret_word' => 'skrillsecret']],
+            'senangpay' => ['mode' => 'sandbox', 'sandbox' => ['merchant_id' => 'M1', 'secret_key' => 'sp_secret']],
+            'easypaisa' => ['mode' => 'sandbox', 'sandbox' => ['store_id' => '1001', 'hash_key' => 'ABCDEFGHIJKLMNOP', 'username' => 'u', 'password' => 'p', 'account_num' => '123']],
             'paypal' => ['mode' => 'sandbox', 'sandbox' => ['client_id' => 'cid', 'client_secret' => 'csec']],
             'paytm' => ['mode' => 'sandbox', 'sandbox' => ['merchant_id' => 'MID123', 'merchant_key' => 'abcdefgh12345678']],
             'flutterwave' => ['mode' => 'sandbox', 'sandbox' => ['secret_key' => 'FLWSECK_TEST-x'], 'secret_hash' => 'my-hash'],
@@ -328,5 +337,154 @@ class GatewayFlowTest extends TestCase
 
         $this->assertTrue(Payment::refund('paypal', 'C1', 5));
         Http::assertSent(fn ($r) => str_ends_with($r->url(), '/C1/refund') && $r['amount']['currency_code'] === 'EUR');
+    }
+
+    public function test_phonepe_pay_status_and_callback(): void
+    {
+        Http::fake([
+            '*/pg/v1/pay' => Http::response(['success' => true, 'code' => 'PAYMENT_INITIATED', 'data' => ['instrumentResponse' => ['redirectInfo' => ['url' => 'https://mercury-uat.phonepe.com/pay/x']]]]),
+            '*/pg/v1/status/PGTESTPAYUAT/ORDER_1001' => Http::response(['success' => true, 'code' => 'PAYMENT_SUCCESS', 'data' => ['state' => 'COMPLETED', 'amount' => 10000, 'transactionId' => 'T1']]),
+        ]);
+
+        $this->assertSame('https://mercury-uat.phonepe.com/pay/x', Payment::pay('phonepe', $this->request(100, 'INR'))->redirectUrl);
+
+        Http::assertSent(function ($r) {
+            if (!str_ends_with($r->url(), '/pg/v1/pay')) {
+                return false;
+            }
+            $xVerify = $r->header('X-VERIFY')[0];
+            return $xVerify === hash('sha256', $r['request'] . '/pg/v1/pay' . 'salt-123') . '###1'
+                && !str_contains($xVerify, 'salt-123')
+                && json_decode(base64_decode($r['request']), true)['amount'] === 10000;
+        });
+
+        $this->assertTrue(Payment::verify('phonepe', ['merchantTransactionId' => 'ORDER_1001'])->matchesAmount(100, 'INR'));
+
+        $response = base64_encode(json_encode(['data' => ['merchantTransactionId' => 'ORDER_1001']]));
+        $this->postJson('/payments/webhook/phonepe', ['response' => $response], ['X-VERIFY' => hash('sha256', $response . 'salt-123') . '###1'])->assertOk();
+        $this->postJson('/payments/webhook/phonepe', ['response' => $response], ['X-VERIFY' => 'forged###1'])->assertStatus(401);
+    }
+
+    public function test_myfatoorah_pay_and_verify(): void
+    {
+        Http::fake([
+            'apitest.myfatoorah.com/v2/SendPayment' => Http::response(['IsSuccess' => true, 'Data' => ['InvoiceId' => 77, 'InvoiceURL' => 'https://demo.MyFatoorah.com/KWT/ie/77']]),
+            'apitest.myfatoorah.com/v2/GetPaymentStatus' => Http::response(['IsSuccess' => true, 'Data' => [
+                'InvoiceId' => 77, 'InvoiceStatus' => 'Paid', 'InvoiceValue' => 5.5, 'CustomerReference' => 'ORDER_1001',
+                'InvoiceTransactions' => [['TransactionStatus' => 'Succss', 'PaymentId' => 'P9', 'Currency' => 'KWD']],
+            ]]),
+        ]);
+
+        $this->assertSame('https://demo.MyFatoorah.com/KWT/ie/77', Payment::pay('myfatoorah', $this->request(5.5, 'KWD'))->redirectUrl);
+        $verify = Payment::verify('myfatoorah', ['paymentId' => 'P9']);
+        $this->assertSame('ORDER_1001', $verify->transactionId);
+        $this->assertTrue($verify->matchesAmount(5.5, 'KWD'));
+    }
+
+    public function test_pesapal_pay_and_verify(): void
+    {
+        Http::fake([
+            '*/api/Auth/RequestToken' => Http::response(['token' => 'tkn']),
+            '*/api/Transactions/SubmitOrderRequest' => Http::response(['order_tracking_id' => 'TRK1', 'redirect_url' => 'https://cybqa.pesapal.com/iframe?x=1']),
+            '*/api/Transactions/GetTransactionStatus*' => Http::response(['status_code' => 1, 'amount' => 300, 'currency' => 'KES', 'confirmation_code' => 'C1']),
+        ]);
+
+        $pay = Payment::pay('pesapal', $this->request(300, 'KES'));
+        $this->assertSame('TRK1', $pay->transactionId);
+        Http::assertSent(fn ($r) => str_contains($r->url(), 'SubmitOrderRequest') && $r['notification_id'] === 'ipn-1' && $r->hasHeader('Authorization', 'Bearer tkn'));
+
+        $this->assertTrue(Payment::verify('pesapal', ['OrderTrackingId' => 'TRK1'])->matchesAmount(300, 'KES'));
+    }
+
+    public function test_iyzico_auth_header_and_verify(): void
+    {
+        Http::fake([
+            '*/checkoutform/initialize/auth/ecom' => Http::response(['status' => 'success', 'token' => 'tok1', 'paymentPageUrl' => 'https://sandbox-cpp.iyzipay.com?token=tok1']),
+            '*/checkoutform/auth/ecom/detail' => Http::response(['status' => 'success', 'paymentStatus' => 'SUCCESS', 'paymentId' => '555', 'paidPrice' => 120.0, 'currency' => 'TRY']),
+        ]);
+
+        $this->assertSame('tok1', Payment::pay('iyzico', $this->request(120, 'TRY'))->transactionId);
+
+        Http::assertSent(function ($r) {
+            $rnd = $r->header('x-iyzi-rnd')[0];
+            $path = parse_url($r->url(), PHP_URL_PATH);
+            $expected = 'IYZWSv2 ' . base64_encode('apiKey:iyz_api&randomKey:' . $rnd . '&signature:' . hash_hmac('sha256', $rnd . $path . $r->body(), 'iyz_secret'));
+            return $r->header('Authorization')[0] === $expected;
+        });
+
+        $verify = Payment::verify('iyzico', ['token' => 'tok1']);
+        $this->assertSame('555', $verify->gatewayReference);
+        $this->assertTrue($verify->matchesAmount(120, 'TRY'));
+    }
+
+    public function test_telr_create_and_check(): void
+    {
+        Http::fake(function ($r) {
+            return $r['ivp_method'] === 'create'
+                ? Http::response(['order' => ['ref' => 'REF1', 'url' => 'https://secure.telr.com/gateway/process.html?o=REF1']])
+                : Http::response(['order' => ['ref' => 'REF1', 'status' => ['code' => 3, 'text' => 'Paid'], 'amount' => '75.00', 'currency' => 'AED']]);
+        });
+
+        $this->assertSame('REF1', Payment::pay('telr', $this->request(75, 'AED'))->transactionId);
+        Http::assertSent(fn ($r) => $r['ivp_authkey'] === 'telrkey' && $r['ivp_test'] === '1');
+        $this->assertTrue(Payment::verify('telr', ['order_ref' => 'REF1'])->matchesAmount(75, 'AED'));
+    }
+
+    public function test_payfast_signature_and_itn(): void
+    {
+        $gateway = Payment::gateway('payfast');
+        $pay = $gateway->pay($this->request(200, 'ZAR'));
+        $fields = $pay->getData('form_params');
+        $signature = $fields['signature'];
+        unset($fields['signature']);
+        $this->assertSame($gateway->signature($fields), $signature);
+        $this->assertStringContainsString('sandbox.payfast.co.za/eng/process', $pay->redirectUrl);
+
+        Http::fake(['sandbox.payfast.co.za/eng/query/validate' => Http::response('VALID')]);
+
+        $itn = ['m_payment_id' => 'ORDER_1001', 'pf_payment_id' => '1089250', 'payment_status' => 'COMPLETE', 'item_name' => 'Order', 'amount_gross' => '200.00', 'merchant_id' => '10000100'];
+        $itn['signature'] = $gateway->signature($itn);
+
+        $this->assertTrue(Payment::verify('payfast', $itn)->matchesAmount(200, 'ZAR'));
+
+        $this->expectException(\Mdiqbal\LaravelPayments\Exceptions\InvalidSignatureException::class);
+        Payment::verify('payfast', ['amount_gross' => '1.00'] + $itn);
+    }
+
+    public function test_skrill_md5sig(): void
+    {
+        $post = ['merchant_id' => '123', 'transaction_id' => 'ORDER_1001', 'mb_amount' => '9.99', 'mb_currency' => 'EUR', 'status' => '2', 'amount' => '9.99', 'currency' => 'EUR', 'pay_to_email' => 'shop@example.com'];
+        $post['md5sig'] = strtoupper(md5('123ORDER_1001' . strtoupper(md5('skrillsecret')) . '9.99EUR2'));
+
+        $this->assertTrue(Payment::verify('skrill', $post)->matchesAmount(9.99, 'EUR'));
+        $this->postJson('/payments/webhook/skrill', ['md5sig' => 'BAD'] + $post)->assertStatus(401);
+    }
+
+    public function test_senangpay_hash(): void
+    {
+        $pay = Payment::pay('senangpay', $this->request(30, 'MYR'));
+        parse_str(parse_url($pay->redirectUrl, PHP_URL_QUERY), $q);
+        $this->assertSame(hash_hmac('sha256', 'sp_secret' . $q['detail'] . '30.00' . 'ORDER_1001', 'sp_secret'), $q['hash']);
+
+        $cb = ['status_id' => '1', 'order_id' => 'ORDER_1001', 'transaction_id' => 'T7', 'msg' => 'Payment_was_successful'];
+        $cb['hash'] = hash_hmac('sha256', 'sp_secret1ORDER_1001T7Payment_was_successful', 'sp_secret');
+
+        $this->assertTrue(Payment::verify('senangpay', $cb)->success);
+        $this->postJson('/payments/webhook/senangpay', ['status_id' => '1', 'hash' => 'bad'] + $cb)->assertStatus(401);
+    }
+
+    public function test_easypaisa_hash_and_inquiry(): void
+    {
+        $gateway = Payment::gateway('easypaisa');
+        $fields = $gateway->pay($this->request(500, 'PKR'))->getData('form_params');
+        $hashed = $fields['merchantHashedReq'];
+        unset($fields['merchantHashedReq']);
+        ksort($fields);
+        $plain = openssl_decrypt(base64_decode($hashed), 'AES-128-ECB', 'ABCDEFGHIJKLMNOP', OPENSSL_RAW_DATA);
+        $this->assertSame(urldecode(http_build_query($fields)), $plain);
+
+        Http::fake(['*/inquire-transaction' => Http::response(['responseCode' => '0000', 'transactionStatus' => 'PAID', 'transactionAmount' => 500.0])]);
+        $this->assertTrue(Payment::verify('easypaisa', ['orderRefNumber' => 'ORDER_1001'])->matchesAmount(500, 'PKR'));
+        Http::assertSent(fn ($r) => $r->hasHeader('Credentials', base64_encode('u:p')));
     }
 }

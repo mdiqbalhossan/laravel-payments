@@ -7,6 +7,8 @@ use Mdiqbal\LaravelPayments\Facades\Payment;
 use Mdiqbal\LaravelPayments\DTO\PaymentRequest;
 use Mdiqbal\LaravelPayments\DTO\PaymentResponse;
 use Mdiqbal\LaravelPayments\Exceptions\GatewayNotFoundException;
+use Mdiqbal\LaravelPayments\Exceptions\PaymentException;
+use Illuminate\Support\Facades\Http;
 
 class PaymentManagerTest extends TestCase
 {
@@ -66,31 +68,37 @@ class PaymentManagerTest extends TestCase
     /** @test */
     public function it_can_process_payment()
     {
-        $request = new PaymentRequest(
-            orderId: 'ORDER_123',
-            amount: 100.00,
-            currency: 'USD',
-            customerEmail: 'test@example.com',
-            callbackUrl: 'https://example.com/callback'
-        );
+        Http::fake(['api.paystack.co/*' => Http::response(['status' => true, 'data' => [
+            'authorization_url' => 'https://checkout.paystack.com/x', 'access_code' => 'x', 'reference' => 'ORDER_123',
+        ]])]);
 
-        $response = Payment::pay('stripe', $request);
+        $response = Payment::pay('paystack', new PaymentRequest(
+            amount: 100.00,
+            currency: 'NGN',
+            orderId: 'ORDER_123',
+            email: 'test@example.com',
+            returnUrl: 'https://example.com/callback'
+        ));
 
         $this->assertInstanceOf(PaymentResponse::class, $response);
+        $this->assertTrue($response->requiresRedirect());
     }
 
     /** @test */
-    public function it_can_verify_webhook()
+    public function it_rejects_unverified_payloads()
     {
-        $payload = [
-            'id' => 'pi_test',
-            'status' => 'succeeded',
-            'amount' => 10000,
-            'currency' => 'usd'
-        ];
+        Http::fake(['api.paystack.co/*' => Http::response(['status' => false, 'message' => 'Transaction reference not found'], 404)]);
 
-        $response = Payment::verify('stripe', $payload);
+        $this->expectException(PaymentException::class);
 
-        $this->assertInstanceOf(PaymentResponse::class, $response);
+        Payment::verify('paystack', ['reference' => 'forged']);
+    }
+
+    /** @test */
+    public function it_wraps_gateway_errors_in_payment_exception()
+    {
+        $this->expectException(PaymentException::class);
+
+        Payment::pay('paystack', new PaymentRequest(amount: 10, currency: 'NGN'));
     }
 }

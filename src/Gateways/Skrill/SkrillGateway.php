@@ -2,14 +2,30 @@
 
 namespace Mdiqbal\LaravelPayments\Gateways\Skrill;
 
-use Exception;
 use Illuminate\Support\Facades\Http;
 use Mdiqbal\LaravelPayments\Core\AbstractGateway;
 use Mdiqbal\LaravelPayments\DTO\PaymentRequest;
 use Mdiqbal\LaravelPayments\DTO\PaymentResponse;
+use Mdiqbal\LaravelPayments\Exceptions\InvalidSignatureException;
+use Mdiqbal\LaravelPayments\Exceptions\PaymentException;
 
+/**
+ * Skrill Quick Checkout.
+ *
+ * Config (per mode): merchant_email (pay_to_email), secret_word (Settings >
+ * Developer Settings), optional api_password (MQI) for status queries.
+ * Skrill has no separate sandbox host; use a test merchant account.
+ *
+ * Flow: pay() prepares a session (prepare_only=1) and returns the checkout
+ * URL. Skrill POSTs the result to status_url (notify URL); verify() checks
+ * md5sig. Without md5sig, verify() queries the MQI API (needs api_password).
+ * Refunds are not supported by this integration.
+ */
 class SkrillGateway extends AbstractGateway
 {
+    private const PAY_URL = 'https://pay.skrill.com';
+    private const MQI_URL = 'https://www.skrill.com/app/query.pl';
+
     public function gatewayName(): string
     {
         return 'skrill';
@@ -17,605 +33,120 @@ class SkrillGateway extends AbstractGateway
 
     public function pay(PaymentRequest $request): PaymentResponse
     {
-        $this->validateRequest($request);
+        $transactionId = $request->getTransactionId() ?? $this->generateOrderId();
 
-        try {
-            // Generate payment session using PSD2 API
-            $paymentSession = $this->createPaymentSession($request);
+        $fields = array_filter([
+            'pay_to_email' => $this->requireModeConfig('merchant_email'),
+            'transaction_id' => $transactionId,
+            'amount' => number_format($request->getAmount(), 2, '.', ''),
+            'currency' => strtoupper($request->getCurrency() ?: 'EUR'),
+            'return_url' => $request->getReturnUrl(),
+            'cancel_url' => $request->getCancelUrl(),
+            'status_url' => $request->getNotifyUrl(),
+            'pay_from_email' => $request->getEmail(),
+            'language' => strtoupper($request->getMeta('language', 'EN')),
+            'detail1_description' => 'Order',
+            'detail1_text' => mb_substr($request->getDescription() ?? $transactionId, 0, 240),
+            'prepare_only' => '1',
+        ], fn ($v) => $v !== null);
 
-            if ($paymentSession && isset($paymentSession['id'])) {
-                return PaymentResponse::redirect($paymentSession['redirect_url'], [
-                    'session_id' => $paymentSession['id'],
-                    'payment_id' => $paymentSession['id'],
-                    'transaction_id' => $request->getTransactionId(),
-                    'message' => 'Redirect to Skrill payment page'
-                ]);
-            }
+        $response = Http::asForm()->timeout(30)->post(self::PAY_URL, $fields);
+        $sid = trim($response->body());
 
-            return $this->createErrorResponse('Failed to create payment session');
-        } catch (Exception $e) {
-            $this->logError('Payment creation failed', [
-                'error' => $e->getMessage(),
-                'request_id' => $request->getTransactionId()
-            ]);
-
-            return $this->createErrorResponse($e->getMessage());
-        }
-    }
-
-    public function verify(array $payload): PaymentResponse
-    {
-        try {
-            $sessionId = $payload['session_id'] ?? null;
-
-            if (!$sessionId) {
-                return $this->createErrorResponse('Session ID not found in webhook payload');
-            }
-
-            // Get payment status from Skrill
-            $paymentStatus = $this->getPaymentStatus($sessionId);
-
-            if (!$paymentStatus) {
-                return $this->createErrorResponse('Payment session not found');
-            }
-
-            return PaymentResponse::success([
-                'transaction_id' => $paymentStatus['merchant_transaction_id'] ?? $sessionId,
-                'session_id' => $sessionId,
-                'payment_id' => $paymentStatus['id'] ?? $sessionId,
-                'status' => $this->mapSkrillStatus($paymentStatus['status'] ?? 'unknown'),
-                'currency' => $paymentStatus['currency'] ?? 'EUR',
-                'amount' => (float) ($paymentStatus['amount'] ?? 0),
-                'fee_amount' => (float) ($paymentStatus['total_fee'] ?? 0),
-                'net_amount' => (float) ($paymentStatus['total_amount'] ?? 0),
-                'payment_method' => $paymentStatus['payment_instrument']['type'] ?? null,
-                'customer_info' => [
-                    'email' => $paymentStatus['customer']['email'] ?? null,
-                    'name' => ($paymentStatus['customer']['first_name'] ?? '') . ' ' . ($paymentStatus['customer']['last_name'] ?? ''),
-                    'ip' => $paymentStatus['customer']['ip'] ?? null,
-                ],
-                'merchant_info' => [
-                    'skrill_session_id' => $sessionId,
-                    'skrill_payment_id' => $paymentStatus['id'] ?? null,
-                    'payment_type' => $paymentStatus['type'] ?? null,
-                    'created_at' => $paymentStatus['creation_date'] ?? null,
-                    'updated_at' => $paymentStatus['modification_date'] ?? null,
-                ],
-                'metadata' => [
-                    'reference' => $paymentStatus['reference'] ?? null,
-                    'merchant_description' => $paymentStatus['merchant_description'] ?? null,
-                ]
-            ]);
-        } catch (Exception $e) {
-            $this->logError('Payment verification failed', [
-                'error' => $e->getMessage(),
-                'payload' => $payload
-            ]);
-
-            return $this->createErrorResponse($e->getMessage());
-        }
-    }
-
-    public function verifySession(string $sessionId): PaymentResponse
-    {
-        try {
-            if (empty($sessionId)) {
-                return $this->createErrorResponse('Session ID is required');
-            }
-
-            // Get payment status from Skrill
-            $paymentStatus = $this->getPaymentStatus($sessionId);
-
-            if (!$paymentStatus) {
-                return $this->createErrorResponse('Payment session not found');
-            }
-
-            return PaymentResponse::success([
-                'transaction_id' => $paymentStatus['merchant_transaction_id'] ?? $sessionId,
-                'session_id' => $sessionId,
-                'payment_id' => $paymentStatus['id'] ?? $sessionId,
-                'status' => $this->mapSkrillStatus($paymentStatus['status'] ?? 'unknown'),
-                'currency' => $paymentStatus['currency'] ?? 'EUR',
-                'amount' => (float) ($paymentStatus['amount'] ?? 0),
-                'fee_amount' => (float) ($paymentStatus['total_fee'] ?? 0),
-                'net_amount' => (float) ($paymentStatus['total_amount'] ?? 0),
-                'payment_method' => $paymentStatus['payment_instrument']['type'] ?? null,
-                'customer_info' => [
-                    'email' => $paymentStatus['customer']['email'] ?? null,
-                    'name' => ($paymentStatus['customer']['first_name'] ?? '') . ' ' . ($paymentStatus['customer']['last_name'] ?? ''),
-                    'ip' => $paymentStatus['customer']['ip'] ?? null,
-                ],
-                'merchant_info' => [
-                    'skrill_session_id' => $sessionId,
-                    'skrill_payment_id' => $paymentStatus['id'] ?? null,
-                    'payment_type' => $paymentStatus['type'] ?? null,
-                    'created_at' => $paymentStatus['creation_date'] ?? null,
-                    'updated_at' => $paymentStatus['modification_date'] ?? null,
-                ],
-                'metadata' => [
-                    'reference' => $paymentStatus['reference'] ?? null,
-                    'merchant_description' => $paymentStatus['merchant_description'] ?? null,
-                ]
-            ]);
-        } catch (Exception $e) {
-            $this->logError('Payment verification failed', [
-                'error' => $e->getMessage(),
-                'session_id' => $sessionId
-            ]);
-
-            return $this->createErrorResponse($e->getMessage());
-        }
-    }
-
-    public function refund(string $transactionId, float $amount): bool
-    {
-        try {
-            Log::info('Processing Skrill refund', [
-                'transaction_id' => $transactionId,
-                'amount' => $amount
-            ]);
-
-            if (empty($transactionId)) {
-                Log::error('Skrill refund failed: Transaction ID is required');
-                return false;
-            }
-
-            // Get original payment details first
-            $paymentStatus = $this->getPaymentStatus($transactionId);
-
-            if (!$paymentStatus) {
-                Log::error('Skrill refund failed: Original payment not found', [
-                    'transaction_id' => $transactionId
-                ]);
-                return false;
-            }
-
-            // Check if payment is eligible for refund
-            if (!in_array($paymentStatus['status'], ['processed', 'success'])) {
-                Log::error('Skrill refund failed: Payment not eligible for refund', [
-                    'transaction_id' => $transactionId,
-                    'status' => $paymentStatus['status']
-                ]);
-                return false;
-            }
-
-            // Prepare refund request
-            $refundData = [
-                'session_id' => $transactionId,
-                'amount' => $amount,
-                'reason' => 'Refund requested',
-                'merchant_account_id' => $this->config->getMerchantId(),
-            ];
-
-            // Make API request to process refund
-            $response = Http::withHeaders([
-                'Content-Type' => 'application/json',
-                'Authorization' => 'Bearer ' . $this->config->getApiKey(),
-            ])->post($this->getEndpoint('psp/v2/refunds'), $refundData);
-
-            if (!$response->successful()) {
-                Log::error('Skrill refund request failed', [
-                    'transaction_id' => $transactionId,
-                    'amount' => $amount,
-                    'status' => $response->status(),
-                    'response' => $response->body()
-                ]);
-                return false;
-            }
-
-            $result = $response->json();
-
-            if (isset($result['id'])) {
-                Log::info('Skrill refund processed successfully', [
-                    'transaction_id' => $transactionId,
-                    'amount' => $amount,
-                    'refund_id' => $result['id']
-                ]);
-                return true;
-            }
-
-            Log::error('Skrill refund processing failed', [
-                'transaction_id' => $transactionId,
-                'amount' => $amount,
-                'error' => $result['error']['message'] ?? 'Unknown error'
-            ]);
-            return false;
-        } catch (Exception $e) {
-            Log::error('Skrill refund processing exception', [
-                'transaction_id' => $transactionId,
-                'amount' => $amount,
-                'error' => $e->getMessage()
-            ]);
-            return false;
-        }
-    }
-
-    public function supportsRefund(): bool
-    {
-        return true;
-    }
-
-    public function getTransactionStatus(string $sessionId): PaymentResponse
-    {
-        return $this->verifySession($sessionId);
-    }
-
-    public function searchTransactions(array $filters = []): PaymentResponse
-    {
-        try {
-            $response = Http::withHeaders([
-                'Content-Type' => 'application/json',
-                'Authorization' => 'Bearer ' . $this->config->getApiKey(),
-            ])->get($this->getEndpoint('psp/v2/payments'), $filters);
-
-            if (!$response->successful()) {
-                return $this->createErrorResponse('Failed to fetch transactions');
-            }
-
-            $result = $response->json();
-
-            $transactions = [];
-            foreach ($result['items'] ?? [] as $payment) {
-                $transactions[] = [
-                    'session_id' => $payment['id'],
-                    'transaction_id' => $payment['merchant_transaction_id'] ?? $payment['id'],
-                    'status' => $this->mapSkrillStatus($payment['status']),
-                    'currency' => $payment['currency'],
-                    'amount' => (float) $payment['amount'],
-                    'created_at' => $payment['creation_date'],
-                    'payment_method' => $payment['payment_instrument']['type'] ?? null,
-                ];
-            }
-
-            return PaymentResponse::success([
-                'transactions' => $transactions,
-                'total' => count($transactions),
-                'limit' => $result['limit'] ?? 10,
-                'offset' => $result['offset'] ?? 0,
-                'has_more' => $result['has_more'] ?? false
-            ]);
-        } catch (Exception $e) {
-            $this->logError('Transaction search failed', [
-                'error' => $e->getMessage(),
-                'filters' => $filters
-            ]);
-
-            return $this->createErrorResponse($e->getMessage());
-        }
-    }
-
-    public function getSupportedCurrencies(): array
-    {
-        return [
-            'EUR', // Euro - Primary currency
-            'USD', // US Dollar
-            'GBP', // British Pound
-            'PLN', // Polish Zloty
-            'CZK', // Czech Koruna
-            'DKK', // Danish Krone
-            'NOK', // Norwegian Krone
-            'SEK', // Swedish Krona
-            'CHF', // Swiss Franc
-            'CAD', // Canadian Dollar
-            'AUD', // Australian Dollar
-            'JPY', // Japanese Yen
-            'HKD', // Hong Kong Dollar
-            'SGD', // Singapore Dollar
-            'ZAR', // South African Rand
-            'INR', // Indian Rupee
-        ];
-    }
-
-    public function getPaymentMethodsForCountry(string $countryCode): array
-    {
-        return $this->config->getPaymentMethods($countryCode) ?? [];
-    }
-
-    protected function createPaymentSession(PaymentRequest $request): ?array
-    {
-        try {
-            $paymentData = [
-                'identification' => [
-                    'transactionid' => $request->getTransactionId(),
-                    'customerid' => $request->getMetadata()['customer_id'] ?? null,
-                ],
-                'payment' => [
-                    'amount' => (float) $request->getAmount(),
-                    'currency' => $request->getCurrency(),
-                    'type' => 'DB', // Debit transaction
-                    'descriptor' => $request->getDescription() ?? 'Payment',
-                ],
-                'account' => [
-                    'holder' => $this->buildAccountHolder($request),
-                    'email' => $request->getEmail(),
-                ],
-                'customer' => [
-                    'name' => [
-                        'firstname' => $this->getFirstName($request->getCustomer()['name'] ?? ''),
-                        'lastname' => $this->getLastName($request->getCustomer()['name'] ?? ''),
-                    ],
-                    'email' => $request->getEmail(),
-                    'phone' => $request->getCustomer()['phone'] ?? null,
-                    'address' => [
-                        'street' => $request->getCustomer()['address'] ?? null,
-                        'city' => $request->getCustomer()['city'] ?? null,
-                        'state' => $request->getCustomer()['state'] ?? null,
-                        'zip' => $request->getCustomer()['postal_code'] ?? null,
-                        'country' => $request->getCustomer()['country'] ?? null,
-                    ],
-                ],
-                'merchant' => [
-                    'redirect' => [
-                        'successurl' => $request->getRedirectUrl(),
-                        'failureurl' => $request->getRedirectUrl(),
-                        'cancelurl' => $request->getRedirectUrl(),
-                        'pendingurl' => $request->getRedirectUrl(),
-                    ],
-                    'notificationurl' => $this->config->getWebhookUrl(),
-                ],
-                'customfields' => $this->buildCustomFields($request->getMetadata() ?? []),
-            ];
-
-            // Add optional parameters
-            if ($request->getMetadata()) {
-                $metadata = $request->getMetadata();
-
-                if (isset($metadata['payment_methods'])) {
-                    $paymentData['payment']['payment_methods'] = $metadata['payment_methods'];
-                }
-
-                if (isset($metadata['language'])) {
-                    $paymentData['customer']['language'] = $metadata['language'];
-                }
-            }
-
-            $response = Http::withHeaders([
-                'Content-Type' => 'application/json',
-                'Authorization' => 'Bearer ' . $this->config->getApiKey(),
-            ])->post($this->getEndpoint('psp/v2/payments'), $paymentData);
-
-            if ($response->successful()) {
-                $result = $response->json();
-                return $result;
-            }
-
-            $this->logError('Payment session creation failed', [
-                'response' => $response->body(),
-                'status' => $response->status()
-            ]);
-
-            return null;
-        } catch (Exception $e) {
-            $this->logError('Payment session creation exception', [
-                'error' => $e->getMessage(),
-                'request_data' => $request->toArray()
-            ]);
-            return null;
-        }
-    }
-
-    protected function getPaymentStatus(string $sessionId): ?array
-    {
-        try {
-            $response = Http::withHeaders([
-                'Content-Type' => 'application/json',
-                'Authorization' => 'Bearer ' . $this->config->getApiKey(),
-            ])->get($this->getEndpoint("psp/v2/payments/{$sessionId}"));
-
-            if ($response->successful()) {
-                return $response->json();
-            }
-
-            return null;
-        } catch (Exception $e) {
-            $this->logError('Payment status check failed', [
-                'error' => $e->getMessage(),
-                'session_id' => $sessionId
-            ]);
-            return null;
-        }
-    }
-
-    protected function buildAccountHolder(array $customer): string
-    {
-        return $customer['name'] ?? 'Customer';
-    }
-
-    protected function getFirstName(string $fullName): string
-    {
-        $nameParts = explode(' ', $fullName, 2);
-        return $nameParts[0] ?? '';
-    }
-
-    protected function getLastName(string $fullName): string
-    {
-        $nameParts = explode(' ', $fullName, 2);
-        return $nameParts[1] ?? '';
-    }
-
-    protected function buildCustomFields(array $metadata): array
-    {
-        $customFields = [];
-        $index = 0;
-
-        foreach ($metadata as $key => $value) {
-            if (is_string($value) && $index < 5) { // Skrill allows up to 5 custom fields
-                $customFields[] = [
-                    'name' => $key,
-                    'value' => $value
-                ];
-                $index++;
-            }
+        if (!$response->successful() || $sid === '' || str_starts_with($sid, '{') || str_starts_with($sid, '<')) {
+            throw new PaymentException('Skrill: failed to prepare payment session (' . $response->status() . ')');
         }
 
-        return $customFields;
-    }
-
-    protected function mapSkrillStatus(string $status): string
-    {
-        $statusMap = [
-            'pending' => 'pending',
-            'processed' => 'completed',
-            'success' => 'completed',
-            'failed' => 'failed',
-            'cancelled' => 'cancelled',
-            'refunded' => 'refunded',
-            'partial_refunded' => 'partially_refunded',
-            'declined' => 'failed',
-            'expired' => 'expired',
-            'preauthorised' => 'authorized',
-            'chargeback' => 'reversed',
-            'reversed' => 'reversed',
-        ];
-
-        return $statusMap[$status] ?? 'unknown';
-    }
-
-    protected function validateRequest(PaymentRequest $request): void
-    {
-        if ($request->getAmount() <= 0) {
-            throw new Exception('Payment amount must be greater than 0');
-        }
-
-        if (empty($request->getTransactionId())) {
-            throw new Exception('Transaction ID is required');
-        }
-
-        if (empty($request->getEmail())) {
-            throw new Exception('Customer email is required');
-        }
-
-        // Validate currency
-        $supportedCurrencies = $this->getSupportedCurrencies();
-        if (!in_array($request->getCurrency(), $supportedCurrencies)) {
-            throw new Exception("Currency {$request->getCurrency()} is not supported by Skrill");
-        }
-    }
-
-    protected function getEndpoint(string $path): string
-    {
-        $baseUrl = $this->isSandbox()
-            ? 'https://psp.dev.skrillws.net'
-            : 'https://psp.skrill.com';
-
-        return $baseUrl . '/' . ltrim($path, '/');
-    }
-
-    protected function createErrorResponse(string $message): PaymentResponse
-    {
-        return PaymentResponse::error($message, 400, [
-            'gateway' => 'skrill',
-            'timestamp' => time()
+        return PaymentResponse::redirect(self::PAY_URL . '/?sid=' . urlencode($sid), [
+            'transaction_id' => $transactionId,
+            'gateway_reference' => $sid,
+            'message' => 'Redirect to Skrill',
         ]);
     }
 
-    public function parseCallback($request): array
+    /**
+     * Verify a status_url POST (md5sig) or, without md5sig, query MQI by transaction_id.
+     */
+    public function verify(array $payload): PaymentResponse
     {
-        return [
-            'session_id' => $request->input('session_id'),
-            'transaction_id' => $request->input('transaction_id'),
-            'status' => $request->input('status'),
-            'amount' => $request->input('amount'),
-            'currency' => $request->input('currency'),
-            'payment_method' => $request->input('payment_method'),
-            'customer_email' => $request->input('customer_email'),
-            'reference' => $request->input('reference'),
-            'merchant_description' => $request->input('merchant_description'),
-            'signature' => $request->input('signature'),
-            'raw_body' => $request->getContent(),
-            'headers' => $request->headers->all()
-        ];
-    }
-
-    public function getGatewayConfig(): array
-    {
-        return [
-            'merchant_id' => $this->config->getMerchantId(),
-            'api_key' => $this->config->getApiKey(),
-            'test_mode' => $this->isSandbox(),
-            'country' => $this->config->getCountry(),
-            'webhook_url' => $this->config->getWebhookUrl()
-        ];
-    }
-
-    public function createSubscription(array $subscriptionData): PaymentResponse
-    {
-        try {
-            // Skrill supports recurring payments through subscription API
-            $subscriptionRequest = [
-                'identification' => [
-                    'transactionid' => 'SUB_' . time(),
-                ],
-                'payment' => [
-                    'amount' => (float) $subscriptionData['amount'],
-                    'currency' => $subscriptionData['currency'] ?? 'EUR',
-                    'type' => 'RECURRING', // Recurring payment
-                    'descriptor' => $subscriptionData['description'] ?? 'Subscription',
-                ],
-                'account' => [
-                    'email' => $subscriptionData['email'],
-                ],
-                'customer' => [
-                    'name' => [
-                        'firstname' => $this->getFirstName($subscriptionData['customer_name'] ?? ''),
-                        'lastname' => $this->getLastName($subscriptionData['customer_name'] ?? ''),
-                    ],
-                    'email' => $subscriptionData['email'],
-                ],
-                'merchant' => [
-                    'redirect' => [
-                        'successurl' => $subscriptionData['return_url'] ?? null,
-                        'failureurl' => $subscriptionData['return_url'] ?? null,
-                    ],
-                    'notificationurl' => $this->config->getWebhookUrl(),
-                ],
-                'recurring' => [
-                    'frequency' => $subscriptionData['frequency'] ?? 1, // 1 = monthly
-                    'period' => $subscriptionData['period'] ?? 'M', // M = monthly
-                    'cycles' => $subscriptionData['cycles'] ?? 0, // 0 = unlimited
-                ],
-            ];
-
-            $response = Http::withHeaders([
-                'Content-Type' => 'application/json',
-                'Authorization' => 'Bearer ' . $this->config->getApiKey(),
-            ])->post($this->getEndpoint('psp/v2/subscriptions'), $subscriptionRequest);
-
-            if ($response->successful()) {
-                $result = $response->json();
-
-                return PaymentResponse::redirect($result['redirect_url'], [
-                    'session_id' => $result['id'],
-                    'payment_id' => $result['id'],
-                    'transaction_id' => $subscriptionRequest['identification']['transactionid'],
-                    'message' => 'Redirect to Skrill subscription setup'
-                ]);
-            }
-
-            return $this->createErrorResponse('Failed to create subscription');
-        } catch (Exception $e) {
-            return $this->createErrorResponse($e->getMessage());
+        if (isset($payload['md5sig'])) {
+            return $this->verifyStatusPost($payload);
         }
+
+        $transactionId = $payload['transaction_id'] ?? null;
+        if (!$transactionId) {
+            throw new PaymentException('Skrill transaction_id not found in payload');
+        }
+
+        return $this->queryStatus($transactionId);
     }
 
-    public function cancelSubscription(string $subscriptionId): PaymentResponse
+    /**
+     * md5sig = strtoupper(md5(merchant_id . transaction_id . strtoupper(md5(secret_word)) . mb_amount . mb_currency . status))
+     */
+    public function md5sig(array $payload): string
     {
-        try {
-            $response = Http::withHeaders([
-                'Content-Type' => 'application/json',
-                'Authorization' => 'Bearer ' . $this->config->getApiKey(),
-            ])->delete($this->getEndpoint("psp/v2/subscriptions/{$subscriptionId}"));
+        return strtoupper(md5(
+            ($payload['merchant_id'] ?? '')
+            . ($payload['transaction_id'] ?? '')
+            . strtoupper(md5($this->requireModeConfig('secret_word')))
+            . ($payload['mb_amount'] ?? '')
+            . ($payload['mb_currency'] ?? '')
+            . ($payload['status'] ?? '')
+        ));
+    }
 
-            if ($response->successful()) {
-                return PaymentResponse::success([
-                    'subscription_id' => $subscriptionId,
-                    'status' => 'cancelled'
-                ]);
-            }
-
-            return $this->createErrorResponse('Failed to cancel subscription');
-        } catch (Exception $e) {
-            return $this->createErrorResponse($e->getMessage());
+    private function verifyStatusPost(array $payload): PaymentResponse
+    {
+        if (!hash_equals($this->md5sig($payload), strtoupper((string) $payload['md5sig']))) {
+            throw new InvalidSignatureException('Invalid Skrill md5sig', gateway: 'skrill');
         }
+
+        if (isset($payload['pay_to_email']) && strcasecmp($payload['pay_to_email'], $this->requireModeConfig('merchant_email')) !== 0) {
+            throw new PaymentException('Skrill pay_to_email does not match the configured merchant');
+        }
+
+        return $this->toResponse($payload);
+    }
+
+    private function queryStatus(string $transactionId): PaymentResponse
+    {
+        $response = Http::timeout(30)->get(self::MQI_URL, [
+            'action' => 'status_trn',
+            'email' => $this->requireModeConfig('merchant_email'),
+            'password' => md5($this->requireModeConfig('api_password')),
+            'trn_id' => $transactionId,
+        ]);
+
+        $lines = preg_split('/\r?\n/', trim($response->body()));
+        if (!$response->successful() || !str_starts_with($lines[0] ?? '', '200') || !isset($lines[1])) {
+            throw new PaymentException('Skrill MQI status query failed: ' . ($lines[0] ?? $response->status()));
+        }
+
+        parse_str($lines[1], $data);
+
+        return $this->toResponse($data + ['transaction_id' => $transactionId]);
+    }
+
+    private function toResponse(array $data): PaymentResponse
+    {
+        $status = (string) ($data['status'] ?? '');
+
+        return new PaymentResponse(
+            success: $status === '2',
+            transactionId: $data['transaction_id'] ?? null,
+            message: "Skrill status: {$status}",
+            status: match ($status) {
+                '2' => 'completed',
+                '0' => 'pending',
+                '-1' => 'canceled',
+                '-3' => 'chargeback',
+                default => 'failed',
+            },
+            data: ['raw' => $data],
+            gatewayReference: $data['mb_transaction_id'] ?? null,
+            amount: isset($data['amount']) ? (float) $data['amount'] : (isset($data['mb_amount']) ? (float) $data['mb_amount'] : null),
+            currency: $data['currency'] ?? $data['mb_currency'] ?? null
+        );
     }
 }

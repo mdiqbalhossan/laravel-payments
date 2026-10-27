@@ -42,7 +42,7 @@ class GatewayQaTest extends TestCase
                 ['status' => 'successful', 'tx_ref' => 'ORD1', 'transaction_id' => '123456']],
             'sslcommerz' => ['BDT', ['store_name' => 'qa', 'store_id' => 'qa_store', 'store_password' => 'QA_SECRET'],
                 ['tran_id' => 'ORD1', 'val_id' => 'forged', 'status' => 'VALID', 'amount' => '100.00', 'currency' => 'BDT']],
-            'mollie' => ['EUR', ['api_key' => 'test_QAQAQAQAQAQAQAQAQAQAQAQAQAQAQA'],
+            'mollie' => ['EUR', ['api_key' => 'test_QA_SECRET_QAQAQAQAQAQAQAQAQAQA'],
                 ['id' => 'tr_forged']],
             'senangpay' => ['MYR', ['merchant_id' => 'QA_MID', 'secret_key' => 'QA_SECRET'],
                 ['status_id' => '1', 'order_id' => 'ORD1', 'transaction_id' => 'T1', 'msg' => 'Payment_was_successful', 'hash' => 'forged']],
@@ -184,13 +184,25 @@ class GatewayQaTest extends TestCase
 
         $seen = $recorded->contains(function ($pair) {
             $req = $pair[0];
+            $decodedBody = json_decode($req->body(), true) ?? [];
+            parse_str($req->body(), $formBody);
+            $decodedBody = is_array($decodedBody) ? $decodedBody + $formBody : $formBody;
             $haystack = json_encode($req->headers()) . $req->body() . $req->url();
-            foreach ($req->header('Authorization') as $auth) {
-                if (str_starts_with($auth, 'Basic ')) {
-                    $haystack .= base64_decode(substr($auth, 6));
+
+            // Credentials are often base64-encoded (Basic auth, IYZWSv2, PhonePe request body)
+            $values = array_merge(...array_values($req->headers()));
+            array_walk_recursive($decodedBody, function ($v) use (&$values) {
+                $values[] = (string) $v;
+            });
+            foreach ($values as $value) {
+                $haystack .= $value;
+                $value = preg_replace('/^(Basic|IYZWSv2)\s+/', '', (string) $value);
+                if (($decoded = base64_decode($value, true)) !== false) {
+                    $haystack .= $decoded;
                 }
             }
-            return str_contains($haystack, 'QA') || str_contains($haystack, base64_encode('SB-Mid-server-QA_SECRET:'));
+
+            return stripos($haystack, 'QA_') !== false || stripos($haystack, 'qa@example.com') !== false || str_contains($haystack, '-QA') || str_contains($haystack, base64_encode('SB-Mid-server-QA_SECRET:'));
         });
 
         $this->assertTrue($seen, 'Outgoing request does not carry the credentials from config/payments.php (sandbox block)');

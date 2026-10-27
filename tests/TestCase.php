@@ -48,6 +48,12 @@ abstract class TestCase extends OrchestraTestCase
                     'client_secret' => 'test_client_secret',
                 ],
             ],
+            'paystack' => [
+                'mode' => 'sandbox',
+                'sandbox' => [
+                    'secret_key' => 'sk_test_dummy',
+                ],
+            ],
         ]);
     }
 }
