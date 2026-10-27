@@ -185,6 +185,11 @@ class GatewayQaTest extends TestCase
         $seen = $recorded->contains(function ($pair) {
             $req = $pair[0];
             $haystack = json_encode($req->headers()) . $req->body() . $req->url();
+            foreach ($req->header('Authorization') as $auth) {
+                if (str_starts_with($auth, 'Basic ')) {
+                    $haystack .= base64_decode(substr($auth, 6));
+                }
+            }
             return str_contains($haystack, 'QA') || str_contains($haystack, base64_encode('SB-Mid-server-QA_SECRET:'));
         });
 

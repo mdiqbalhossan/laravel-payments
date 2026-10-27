@@ -18,7 +18,7 @@ class MercadopagoGateway extends AbstractGateway
 
     protected function getAccessToken(): string
     {
-        return $this->getModeConfig('access_token');
+        return $this->requireModeConfig('access_token');
     }
 
     protected function getWebhookSecret(): ?string
@@ -31,17 +31,14 @@ class MercadopagoGateway extends AbstractGateway
         $this->validateRequest($request);
 
         try {
-            $accessToken = $this->getAccessToken();
-            if (!$accessToken) {
-                throw new PaymentException('Mercado Pago access token is required');
-            }
-
             // Create preference using direct API call
             $preference = $this->createPreference($request);
 
             if ($preference && isset($preference['id'])) {
-                // Get the appropriate checkout URL based on mode
-                $checkoutUrl = $this->getCheckoutUrl($preference['id']);
+                // Use the checkout URL Mercado Pago returns for this account/site
+                $checkoutUrl = ($this->isSandbox() ? $preference['sandbox_init_point'] : null)
+                    ?? $preference['init_point']
+                    ?? $this->getCheckoutUrl($preference['id']);
 
                 $this->log('info', 'Mercado Pago preference created', [
                     'preference_id' => $preference['id'],
@@ -72,22 +69,14 @@ class MercadopagoGateway extends AbstractGateway
     public function verify(array $payload): PaymentResponse
     {
         try {
-            $paymentId = $payload['data']['id'] ?? null;
+            // Webhook (data.id), back_url query (payment_id / collection_id) or explicit id
+            $paymentId = $payload['data']['id'] ?? $payload['payment_id'] ?? $payload['collection_id'] ?? $payload['id'] ?? null;
 
             if (!$paymentId) {
                 return $this->createErrorResponse('Payment ID not found in webhook payload');
             }
 
-            // Verify webhook signature if configured
-            $webhookSecret = $this->getWebhookSecret();
-            if ($webhookSecret) {
-                $signature = $_SERVER['HTTP_X_MELI_SIGNATURE'] ?? '';
-                if (!$this->verifyWebhookSignature($signature, $payload)) {
-                    throw new InvalidSignatureException('Invalid webhook signature');
-                }
-            }
-
-            // Get payment details from Mercado Pago API
+            // Always read the payment from the API; the payload is not trusted
             $payment = $this->getPaymentDetails($paymentId);
 
             if (!$payment) {
@@ -96,12 +85,15 @@ class MercadopagoGateway extends AbstractGateway
 
             // Map Mercado Pago status to standard status
             $status = $this->mapMercadoPagoStatus($payment['status'] ?? 'unknown');
-            $success = in_array($status, ['completed', 'authorized']);
+            $success = ($payment['status'] ?? null) === 'approved';
 
             return new PaymentResponse(
                 success: $success,
                 transactionId: $payment['external_reference'] ?? $paymentId,
                 status: $status,
+                gatewayReference: (string) $paymentId,
+                amount: isset($payment['transaction_amount']) ? (float) $payment['transaction_amount'] : null,
+                currency: $payment['currency_id'] ?? null,
                 data: [
                     'transaction_id' => $payment['external_reference'] ?? $paymentId,
                     'payment_id' => $paymentId,
@@ -127,6 +119,8 @@ class MercadopagoGateway extends AbstractGateway
                     'metadata' => $payment['metadata'] ?? []
                 ]
             );
+        } catch (InvalidSignatureException $e) {
+            throw $e;
         } catch (Exception $e) {
             $this->log('error', 'Payment verification failed', [
                 'error' => $e->getMessage(),
@@ -135,6 +129,39 @@ class MercadopagoGateway extends AbstractGateway
 
             return $this->createErrorResponse($e->getMessage());
         }
+    }
+
+    /**
+     * Webhook: when webhook_secret is configured, the x-signature header
+     * (ts=...,v1=...) is checked against "id:{data.id};request-id:{x-request-id};ts:{ts};".
+     * The payment is then always re-read from the API.
+     */
+    public function handleWebhook(array $payload, string $rawBody, array $headers): PaymentResponse
+    {
+        $secret = $this->getWebhookSecret();
+
+        if ($secret) {
+            $parts = [];
+            foreach (explode(',', $headers['x-signature'] ?? '') as $part) {
+                $kv = explode('=', trim($part), 2);
+                if (count($kv) === 2) {
+                    $parts[$kv[0]] = $kv[1];
+                }
+            }
+
+            $dataId = strtolower((string) ($payload['data']['id'] ?? ''));
+            $manifest = "id:{$dataId};request-id:" . ($headers['x-request-id'] ?? '') . ';ts:' . ($parts['ts'] ?? '') . ';';
+
+            if (!isset($parts['ts'], $parts['v1']) || !hash_equals(hash_hmac('sha256', $manifest, $secret), $parts['v1'])) {
+                throw new InvalidSignatureException('Invalid Mercado Pago webhook signature', gateway: 'mercadopago');
+            }
+        }
+
+        if (($payload['type'] ?? $payload['topic'] ?? 'payment') !== 'payment') {
+            return new PaymentResponse(success: false, status: 'ignored', message: 'Not a payment notification');
+        }
+
+        return $this->verify($payload);
     }
 
     public function refund(string $transactionId, float $amount): bool
@@ -257,17 +284,15 @@ class MercadopagoGateway extends AbstractGateway
                 'payer' => $this->buildPayerData($request),
                 'back_urls' => [
                     'success' => $request->getRedirectUrl(),
-                    'failure' => $request->getRedirectUrl(),
+                    'failure' => $request->getCancelUrl() ?? $request->getRedirectUrl(),
                     'pending' => $request->getRedirectUrl()
                 ],
+                'notification_url' => $request->getNotifyUrl(),
                 'auto_return' => 'approved',
-                'payment_methods' => [
-                    'excluded_payment_methods' => [],
-                    'excluded_payment_types' => [],
-                    'installments' => null
-                ],
                 'metadata' => $request->getMetadata() ?? []
             ];
+
+            $preferenceData = array_filter($preferenceData, fn ($v) => $v !== null && $v !== []);
 
             // Create preference using API
             $response = $this->makeRequest('POST', $this->getEndpoint('checkout/preferences'), [
@@ -283,9 +308,8 @@ class MercadopagoGateway extends AbstractGateway
         } catch (Exception $e) {
             $this->log('error', 'Failed to create preference', [
                 'error' => $e->getMessage(),
-                'request_data' => $request->toArray()
             ]);
-            return null;
+            throw $e;
         }
     }
 

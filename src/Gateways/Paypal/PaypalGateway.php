@@ -8,7 +8,7 @@ use Mdiqbal\LaravelPayments\DTO\PaymentResponse;
 use Mdiqbal\LaravelPayments\Exceptions\InvalidSignatureException;
 use Mdiqbal\LaravelPayments\Exceptions\PaymentException;
 use GuzzleHttp\Client;
-use GuzzleHttp\Exception\RequestException;
+use Illuminate\Support\Facades\Http;
 
 class PaypalGateway extends AbstractGateway
 {
@@ -268,22 +268,16 @@ class PaypalGateway extends AbstractGateway
             throw new PaymentException('PayPal client credentials not configured');
         }
 
-        $client = new Client();
-        $response = $client->request('POST', $this->getEndpoint('v1/oauth2/token'), [
-            'auth' => [$clientId, $clientSecret],
-            'form_params' => [
-                'grant_type' => 'client_credentials'
-            ],
-            'headers' => [
-                'Accept' => 'application/json',
-                'Accept-Language' => 'en_US'
-            ]
-        ]);
+        $response = Http::asForm()
+            ->acceptJson()
+            ->timeout(30)
+            ->withBasicAuth($clientId, $clientSecret)
+            ->post($this->getEndpoint('v1/oauth2/token'), ['grant_type' => 'client_credentials']);
 
-        $data = json_decode($response->getBody()->getContents(), true);
+        $data = $response->json() ?? [];
 
-        if (!isset($data['access_token'])) {
-            throw new PaymentException('Failed to get PayPal access token');
+        if (!$response->successful() || !isset($data['access_token'])) {
+            throw new PaymentException('Failed to get PayPal access token: ' . ($data['error_description'] ?? $response->status()));
         }
 
         $this->accessToken = $data['access_token'];
@@ -454,51 +448,17 @@ class PaypalGateway extends AbstractGateway
     }
 
     /**
-     * Make authenticated HTTP request
+     * Make an API request; $url is relative to the PayPal API host.
      */
     protected function makeRequest(string $method, string $url, array $options = []): array
     {
-        $client = $this->createHttpClient();
+        $data = parent::makeRequest($method, $this->getEndpoint($url), $options);
 
-        try {
-            $response = $client->request($method, $url, $options);
-            $body = $response->getBody()->getContents();
-            $data = json_decode($body, true);
-
-            if ($data === null) {
-                throw new PaymentException("Invalid JSON response from PayPal");
-            }
-
-            // Handle PayPal errors
-            if (isset($data['error'])) {
-                $message = $data['error_description'] ?? $data['error'] ?? 'PayPal API error';
-                throw new PaymentException($message);
-            }
-
-            if (isset($data['details']) && is_array($data['details'])) {
-                $messages = array_map(fn($detail) => $detail['description'] ?? '', $data['details']);
-                if (!empty($messages)) {
-                    throw new PaymentException(implode(', ', $messages));
-                }
-            }
-
-            return $data;
-
-        } catch (RequestException $e) {
-            $message = "PayPal API request failed: {$e->getMessage()}";
-
-            if ($e->hasResponse()) {
-                $body = $e->getResponse()->getBody()->getContents();
-                $data = json_decode($body, true);
-
-                if ($data && isset($data['message'])) {
-                    $message = $data['message'];
-                } elseif ($data && isset($data['error_description'])) {
-                    $message = $data['error_description'];
-                }
-            }
-
-            throw new PaymentException($message, 0, $e);
+        if (isset($data['name'], $data['details']) && is_array($data['details'])) {
+            $messages = array_filter(array_map(fn ($detail) => $detail['description'] ?? '', $data['details']));
+            throw new PaymentException($messages ? implode(', ', $messages) : $data['name']);
         }
+
+        return $data;
     }
 }

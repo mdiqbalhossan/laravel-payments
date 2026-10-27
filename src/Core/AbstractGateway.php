@@ -10,6 +10,7 @@ use Mdiqbal\LaravelPayments\Exceptions\PaymentException;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\RequestException;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 
 abstract class AbstractGateway implements PaymentGatewayInterface
@@ -137,36 +138,39 @@ abstract class AbstractGateway implements PaymentGatewayInterface
     }
 
     /**
-     * Make HTTP request
+     * Make HTTP request through Laravel's HTTP client (so apps can fake,
+     * log and inspect gateway traffic). $options uses Guzzle option names
+     * (headers, json, body, form_params, query, auth).
      */
     protected function makeRequest(string $method, string $url, array $options = []): array
     {
         try {
-            $response = $this->client->request($method, $url, $options);
-            $body = $response->getBody()->getContents();
-            $data = json_decode($body, true);
-
-            if ($data === null) {
-                throw new PaymentException("Invalid JSON response from {$this->gatewayName()}");
-            }
-
-            return $data;
-        } catch (RequestException $e) {
-            $message = "HTTP request failed: {$e->getMessage()}";
-
-            if ($e->hasResponse()) {
-                $body = $e->getResponse()->getBody()->getContents();
-                $data = json_decode($body, true);
-
-                if ($data && isset($data['message'])) {
-                    $message = $data['message'];
-                }
-            }
-
-            throw new PaymentException($message, 0, $e);
-        } catch (\Exception $e) {
-            throw new PaymentException("Request failed: {$e->getMessage()}", 0, $e);
+            $response = Http::timeout(30)
+                ->acceptJson()
+                ->withUserAgent('Laravel-Payments/2.x')
+                ->send(strtoupper($method), $url, $options);
+        } catch (\Throwable $e) {
+            throw new PaymentException("HTTP request to {$this->gatewayName()} failed: {$e->getMessage()}", 0, $e);
         }
+
+        $data = $response->json();
+
+        if (!$response->successful()) {
+            $message = is_array($data)
+                ? ($data['message'] ?? $data['error_description'] ?? $data['error']['message'] ?? $data['error'] ?? null)
+                : null;
+
+            throw new PaymentException(
+                is_string($message) ? $message : "{$this->gatewayName()} API returned HTTP {$response->status()}",
+                $response->status()
+            );
+        }
+
+        if (!is_array($data)) {
+            throw new PaymentException("Invalid JSON response from {$this->gatewayName()}");
+        }
+
+        return $data;
     }
 
     /**
