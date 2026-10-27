@@ -2,7 +2,7 @@
 
 All notable changes to `mdiqbal/laravel-payments` will be documented in this file.
 
-## [Unreleased]
+## [3.0.0] - 2026-10-27
 
 QA pass over all 21 gateways (see `QA_REPORT.md`). Most gateways were rewritten
 against the providers' current APIs.

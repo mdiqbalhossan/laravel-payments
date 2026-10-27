@@ -7,30 +7,10 @@ A comprehensive Laravel package for integrating multiple payment gateways into y
 - [Features](#features)
 - [Supported Gateways](#supported-gateways)
 - [Installation](#installation)
+- [Upgrading to 3.x](#upgrading-to-3x)
 - [Configuration](#configuration)
 - [Basic Usage](#basic-usage)
-- [Gateway Documentation](#gateway-documentation)
-  - [Stripe](#stripe)
-  - [PayPal](#paypal)
-  - [Paystack](#paystack)
-  - [Razorpay](#razorpay)
-  - [PayTM](#paytm)
-  - [Flutterwave](#flutterwave)
-  - [SSLCommerz](#sslcommerz)
-  - [Mollie](#mollie)
-  - [SenangPay](#senangpay)
-  - [bKash](#bkash)
-  - [Mercado Pago](#mercado-pago)
-  - [Cashfree](#cashfree)
-  - [PayFast](#payfast)
-  - [Skrill](#skrill)
-  - [PhonePe](#phonepe)
-  - [Telr](#telr)
-  - [iyzico](#iyzico)
-  - [Pesapal](#pesapal)
-  - [Midtrans](#midtrans)
-  - [MyFatoorah](#myfatoorah)
-  - [EasyPaisa](#easypaisa)
+- [Gateway reference](#gateway-reference)
 - [Testing](#testing)
 - [Contributing](#contributing)
 - [License](#license)
@@ -77,7 +57,7 @@ A comprehensive Laravel package for integrating multiple payment gateways into y
 1. Install the package via Composer:
 
 ```bash
-composer require mdiqbal/laravel-payments
+composer require mdiqbal/laravel-payments:^3.0
 ```
 
 2. Publish the configuration file:
@@ -111,6 +91,46 @@ MERCADOPAGO_LIVE_ACCESS_TOKEN=your_live_access_token
 MERCADOPAGO_COUNTRY=MX
 MERCADOPAGO_WEBHOOK_SECRET=your_webhook_secret
 ```
+
+## Upgrading to 3.x
+
+Version 3.0 fixes the issues found in the QA pass over all 21 gateways (see
+[QA_REPORT.md](QA_REPORT.md) and [CHANGELOG.md](CHANGELOG.md)). To update an existing project:
+
+```bash
+# 1. Update the package
+composer require mdiqbal/laravel-payments:^3.0
+
+# 2. Remove the gateway SDKs 2.x pulled in (3.0 no longer needs them).
+#    Skip any your own code still uses.
+composer remove srmklive/paypal flutterwavedev/flutterwave-v3 raziul/sslcommerz-laravel \
+    mollie/laravel-mollie sabitahmad/laravel-bkash loveycom/cashfree yogeshgupta/phonepe-laravel \
+    njoguamos/laravel-pesapal midtrans/midtrans-php myfatoorah/laravel-package zfhassaan/easypaisa
+
+# 3. Re-publish the config (back up config/payments.php first if you changed it)
+php artisan vendor:publish --provider="Mdiqbal\LaravelPayments\PaymentsServiceProvider" --tag=config --force
+
+# 4. Clear cached config
+php artisan config:clear
+```
+
+If you only want bug fixes inside the 3.x line later, `composer update mdiqbal/laravel-payments` is enough.
+
+**Breaking changes to check in your code:**
+
+- Credentials must be in the `sandbox` / `live` blocks of `config/payments.php`; missing ones now
+  throw `PaymentException` instead of falling back to fake "mock" responses.
+- `{GATEWAY}_MODE` must be `sandbox` or `live` (`test`/`production` are accepted as aliases).
+- Webhooks are signature-checked. Add the new `.env` keys for the gateways you use:
+  `STRIPE_WEBHOOK_SECRET`, `PAYPAL_WEBHOOK_SECRET` (the PayPal Webhook ID), `RAZORPAY_WEBHOOK_SECRET`,
+  `FLUTTERWAVE_SECRET_HASH`, `SKRILL_*_SECRET_WORD`, `EASYPAISA_*_ACCOUNT_NUM`,
+  `PHONEPE_*_MERCHANT_ID` / `PHONEPE_*_SALT_KEY` / `PHONEPE_*_SALT_INDEX` (the old PhonePe names still work).
+- Use `Payment::pay($gateway, $request)` / `Payment::verify($gateway, $payload)`; see the
+  [Gateway reference](#gateway-reference) for the payload each gateway's `verify()` expects.
+- Check `$response->matchesAmount($order->total, $order->currency)` before marking an order paid.
+- Gateway-specific helpers that returned fake data (e.g. SSLCommerz `createSubscription()`,
+  Flutterwave payment-link and transfer helpers) were removed.
+- senangPay, PayFast, Skrill, Telr and Easypaisa report `supportsRefund() === false`.
 
 ## Configuration
 
